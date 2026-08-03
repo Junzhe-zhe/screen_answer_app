@@ -1,0 +1,41 @@
+name: screen_answer_app
+description: "屏幕答题助手 - Flutter 离线答题工具"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 状态管理
+  flutter_riverpod: ^2.6.1
+
+  # 本地数据库
+  sqflite: ^2.4.1
+  path_provider: ^2.1.5
+  path: ^1.9.1
+
+  # 本地持久化
+  shared_preferences: ^2.3.4
+
+  # 文件选择
+  file_picker: ^8.1.7
+
+  # Excel 解析
+  # CSV 解析
+  csv: ^6.0.0
+
+  # UUID 生成
+  uuid: ^4.5.1
+  archive: ^3.6.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
