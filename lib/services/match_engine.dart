@@ -42,19 +42,17 @@ class MatchEngine {
   /// L1: 精确匹配 (O(1)) + L1.5: 包含匹配，未命中返回 null
   MatchResult? _exactAndContainMatch(String preprocessed,
       {String ocrType = ''}) {
-    // L1: 精确匹配
-    final exact = _exactMap[preprocessed];
-    if (exact != null) {
-      // 题型过滤：如果题型已知且不匹配，降级到包含/模糊匹配
-      if (ocrType.isEmpty || exact.type.isEmpty || ocrType == exact.type) {
-        return MatchResult(
-          answer: exact.answer,
-          matchedQuestion: exact.question,
-          confidence: 1.0,
-          level: MatchLevel.exact,
-          explanation: exact.explanation,
-        );
-      }
+    // L1: 精确匹配。按题型从原始题目列表筛选，避免 exactMap 中的同题覆盖或错题型命中。
+    for (final pair in _pairs.reversed) {
+      if (!_isTypeCompatible(pair, ocrType, allowUnknownOcrType: true)) continue;
+      if (TextPreprocessor.preprocess(pair.question) != preprocessed) continue;
+      return MatchResult(
+        answer: pair.answer,
+        matchedQuestion: pair.question,
+        confidence: 1.0,
+        level: MatchLevel.exact,
+        explanation: pair.explanation,
+      );
     }
 
     // L1.5: 包含匹配 - OCR 文本包含整道题目（OCR 常带题号、选项等噪声）
@@ -63,10 +61,7 @@ class MatchEngine {
     for (final entry in _exactMap.entries) {
       final bankQ = entry.key;
       final pair = entry.value;
-      // 题型过滤：OCR 题型和题库题型都已知且不匹配时跳过
-      if (ocrType.isNotEmpty && pair.type.isNotEmpty && ocrType != pair.type) {
-        continue;
-      }
+      if (!_isTypeCompatible(pair, ocrType, allowUnknownOcrType: true)) continue;
       if (bankQ.length < 8) continue; // 太短的题目跳过包含匹配
       if (preprocessed.contains(bankQ)) {
         // OCR 包含完整题目 -> 精确匹配
@@ -118,8 +113,11 @@ class MatchEngine {
     final scored = <_ScoredPair>[];
 
     for (final pair in _pairs) {
-      // 题型过滤
-      if (ocrType.isNotEmpty && pair.type.isNotEmpty && ocrType != pair.type) {
+      if (!_isTypeCompatible(
+        pair,
+        ocrType,
+        allowUnknownOcrType: ocrType.isEmpty,
+      )) {
         continue;
       }
       final target = TextPreprocessor.preprocess(pair.question);
@@ -184,6 +182,18 @@ class MatchEngine {
               ))
           .toList(),
     );
+  }
+
+  bool _isTypeCompatible(
+    QuestionPair pair,
+    String ocrType, {
+    required bool allowUnknownOcrType,
+  }) {
+    if (ocrType.isEmpty) {
+      // 未识别题型时允许精确/包含匹配保留兼容性；模糊评分由调用方禁止跨题型。
+      return allowUnknownOcrType || pair.type.isNotEmpty;
+    }
+    return pair.type == ocrType;
   }
 
   /// 最长公共子串
@@ -272,11 +282,37 @@ class QuestionPair {
     String? type,
   }) : type = type ?? QuestionPair.inferType(answer);
 
-  /// 从答案推断题型
+  /// 从答案推断题型，兼容导入题库中的"字母 + 选项内容"格式。
   static String inferType(String answer) {
-    if (answer.contains('正确') || answer.contains('错误')) return 'judge';
-    if (RegExp(r'^[A-D]{2,}$').hasMatch(answer.trim())) return 'multi';
-    if (RegExp(r'^[A-D]$').hasMatch(answer.trim())) return 'single';
+    final value = answer.trim().toUpperCase();
+    if (value.isEmpty) return '';
+
+    final judgeText = value.replaceAll(RegExp(r'[\s.、．:：()（）]'), '');
+    final judgeWords = RegExp(r'(正确|错误|对|错|是|否|TRUE|FALSE)')
+        .allMatches(judgeText)
+        .length;
+    if (RegExp(r'^(正确|错误|对|错|是|否|TRUE|FALSE|T|F)$').hasMatch(judgeText) ||
+        judgeWords >= 2 ||
+        (RegExp(r'^[A-H](正确|错误|对|错|是|否)$').hasMatch(judgeText))) {
+      return 'judge';
+    }
+
+    final markers = RegExp(r'(?<![A-Z])[A-H](?=\s*[.、．:：)]|$)')
+        .allMatches(value)
+        .map((m) => m.group(0)!.trim())
+        .where((m) => m.isNotEmpty)
+        .toSet();
+    if (markers.length >= 2) return 'multi';
+    if (markers.length == 1 &&
+        RegExp(r'^\s*[A-H]\s*(?:[.、．:：)].*)?$', caseSensitive: false)
+            .hasMatch(value)) {
+      return 'single';
+    }
+
+    if (RegExp(r'^[A-H]{2,}$').hasMatch(value.replaceAll(RegExp(r'[\s,，、;；/]'), ''))) {
+      return 'multi';
+    }
+    if (RegExp(r'^[A-H]$').hasMatch(value)) return 'single';
     return '';
   }
 }

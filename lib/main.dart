@@ -1,13 +1,37 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'screens/home_screen.dart';
+import 'services/diagnostic_log_service.dart';
 import 'services/recognition_service.dart';
 import 'utils/constants.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  RecognitionService.initialize();
-  runApp(const ProviderScope(child: ScreenAnswerApp()));
+  unawaited(DiagnosticLogService.initialize());
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    unawaited(DiagnosticLogService.write(
+      'flutter-framework',
+      details.exception,
+      details.stack,
+    ));
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    unawaited(DiagnosticLogService.write('flutter-platform', error, stack));
+    return true;
+  };
+  runZonedGuarded(
+    () {
+      unawaited(RecognitionService.initialize());
+      runApp(const ProviderScope(child: ScreenAnswerApp()));
+    },
+    (error, stack) {
+      unawaited(DiagnosticLogService.write('flutter-zone', error, stack));
+    },
+  );
 }
 
 class ScreenAnswerApp extends StatelessWidget {

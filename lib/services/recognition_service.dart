@@ -6,6 +6,7 @@ import '../models/match_result.dart';
 import '../models/question.dart';
 import '../models/question_bank.dart';
 import '../services/database_service.dart';
+import 'diagnostic_log_service.dart';
 import '../services/match_engine.dart';
 import '../utils/constants.dart';
 
@@ -47,8 +48,9 @@ class RecognitionService {
     try {
       final bank = await DatabaseService.getBank(bankId);
       if (bank != null) await _applyBank(bank);
-    } catch (e) {
+    } catch (e, stack) {
       debugPrint('[RecognitionService] loadBank error: $e');
+      unawaited(DiagnosticLogService.write('recognition-load-bank', e, stack));
     }
   }
 
@@ -61,8 +63,9 @@ class RecognitionService {
         _matchEngine = null;
         _activeBank = null;
       }
-    } catch (e) {
+    } catch (e, stack) {
       debugPrint('[RecognitionService] load bank error: $e');
+      unawaited(DiagnosticLogService.write('recognition-load-default-bank', e, stack));
     }
   }
 
@@ -73,24 +76,35 @@ class RecognitionService {
   }
 
   static Future<dynamic> _onMethodCall(MethodCall call) async {
-    if (call.method == 'recognize') {
+    try {
+      if (call.method == 'recognize') {
       String text;
       String ocrType = '';
+      int? generation;
       if (call.arguments is Map) {
         final args = call.arguments as Map;
         text = args['text'] as String? ?? '';
         ocrType = args['type'] as String? ?? '';
+        generation = (args['generation'] as num?)?.toInt();
       } else {
         // 向后兼容：旧版本传递纯字符串
         text = call.arguments as String;
       }
-      await _process(text, ocrType: ocrType);
+        await _process(text, ocrType: ocrType, generation: generation);
+        return null;
+      }
+      return null;
+    } catch (error, stack) {
+      unawaited(DiagnosticLogService.write('recognition-method-call', error, stack));
       return null;
     }
-    return null;
   }
 
-  static Future<void> _process(String ocrText, {String ocrType = ''}) async {
+  static Future<void> _process(
+    String ocrText, {
+    String ocrType = '',
+    int? generation,
+  }) async {
     await ready;
 
     if (_matchEngine == null || _activeBank == null) {
@@ -100,6 +114,7 @@ class RecognitionService {
         explanation: '',
         level: 'none',
         candidates: const [],
+        generation: generation,
       );
       return;
     }
@@ -127,6 +142,7 @@ class RecognitionService {
       explanation: result.explanation ?? '',
       level: result.level.name,
       candidates: result.candidates,
+      generation: generation,
     );
   }
 
@@ -136,6 +152,7 @@ class RecognitionService {
     required String explanation,
     required String level,
     required List<CandidateItem> candidates,
+    int? generation,
   }) async {
     try {
       await _channel.invokeMethod('result', {
@@ -149,6 +166,7 @@ class RecognitionService {
           'explanation': c.explanation ?? '',
           'score': c.score,
         }).toList(),
+        'generation': generation,
       });
     } catch (e) {
       debugPrint('[RecognitionService] sendResult error: $e');

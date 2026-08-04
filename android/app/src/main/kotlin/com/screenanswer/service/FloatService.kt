@@ -47,6 +47,11 @@ class FloatService : Service() {
     private var ansContent: String = ""
     private var ansContentTv: TextView? = null
     private var ansTitleTv: TextView? = null
+    private var answerSummary: String = "正确答案：--"
+    private var selAnswerTv: TextView? = null
+    private var lastAutoQuestionSignature: String = ""
+    private var pendingAutoQuestionSignature: String? = null
+    private var pendingForceRefresh = false
 
     private var selX = 100; private var selY = 200
     private var selW = 1080; private var selH = 600
@@ -61,6 +66,15 @@ class FloatService : Service() {
 
     // 与 Flutter 匹配引擎的双向通道
     private var recognitionChannel: MethodChannel? = null
+    private var recognitionGeneration = 0L
+    private var activeRecognitionGeneration = 0L
+    private var recognitionInFlight = false
+    private var recognitionTimeout: Runnable? = null
+    private var previousUncaughtHandler: Thread.UncaughtExceptionHandler? = null
+
+    private fun diag(stage: String, message: String, error: Throwable? = null) {
+        DiagnosticLogger.log(this, stage, message, error)
+    }
 
     // 候选答案列表与当前索引（左右滑动切换）
     private var candidates: List<Candidate> = emptyList()
@@ -72,6 +86,12 @@ class FloatService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        previousUncaughtHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            diag("uncaught", "thread=${thread.name} generation=$activeRecognitionGeneration inFlight=$recognitionInFlight", error)
+            previousUncaughtHandler?.uncaughtException(thread, error)
+        }
+        diag("service-create", "screen initialization started")
         val dm = DisplayMetrics()
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         wm?.defaultDisplay?.getRealMetrics(dm)
@@ -79,6 +99,7 @@ class FloatService : Service() {
         selW = screenW - 40; selH = 600
         selX = 20; selY = (screenH * 0.15).toInt()
         createChannel(); startFg(); createBall()
+        diag("service-create", "screen=${screenW}x${screenH} overlay created")
         setupRecognitionChannel()
     }
 
@@ -93,8 +114,15 @@ class FloatService : Service() {
                         val answer = call.argument<String>("answer") ?: ""
                         val explanation = call.argument<String>("explanation") ?: ""
                         val level = call.argument<String>("level") ?: ""
+                        val returnedGeneration = (call.argument<Number>("generation"))?.toLong() ?: 0L
                         val candsRaw = call.argument<List<*>>("candidates") ?: emptyList<Any>()
                         handler.post {
+                            if (returnedGeneration != activeRecognitionGeneration || !recognitionInFlight) {
+                                return@post
+                            }
+                            recognitionInFlight = false
+                            recognitionTimeout?.let { handler.removeCallbacks(it) }
+                            recognitionTimeout = null
                             candidates = candsRaw.mapNotNull {
                                 val m = it as? Map<*, *> ?: return@mapNotNull null
                                 Candidate(
@@ -105,8 +133,21 @@ class FloatService : Service() {
                                 )
                             }
                             candidateIndex = 0
-                            ansContent = formatResult(text, answer, explanation, level, candidates, candidateIndex)
-                            refreshAnswerPanel()
+                            val questionSignature = pendingAutoQuestionSignature
+                                ?: normalizeQuestionSignature(text)
+                            val shouldRefresh = pendingForceRefresh ||
+                                questionSignature.isEmpty() ||
+                                questionSignature != lastAutoQuestionSignature
+                            if (shouldRefresh) {
+                                answerSummary = formatAnswerSummary(answer, level)
+                                ansContent = formatResult(text, answer, explanation, level, candidates, candidateIndex)
+                                selAnswerTv?.text = answerSummary
+                                selAnswerTv?.visibility = View.VISIBLE
+                                lastAutoQuestionSignature = questionSignature
+                                refreshAnswerPanel()
+                            }
+                            pendingAutoQuestionSignature = null
+                            pendingForceRefresh = false
                             // 识别结果返回后重新开启帧监控，持续响应屏幕滑动切题
                             startMonitoring()
                         }
@@ -147,6 +188,7 @@ class FloatService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        diag("service-destroy", "generation=$activeRecognitionGeneration inFlight=$recognitionInFlight captureSetup=$captureSetupDone")
         super.onDestroy()
         stopMonitoring()
         recognitionChannel = null
@@ -304,7 +346,7 @@ class FloatService : Service() {
                 // 标题
                 val titleTv = TextView(this@FloatService).apply {
                     id = View.generateViewId(); tag = "ansTitle"
-                    setText("\u7b54\u6848\u9762\u677f"); setTextColor(0xFFFFFFFF.toInt()); textSize = 14f
+                    setText(answerSummary); setTextColor(0xFFFFFFFF.toInt()); textSize = 14f
                     gravity = Gravity.CENTER; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
                     setPadding((100 * density).toInt(), 0, (44 * density).toInt(), 0)
                 }
@@ -408,7 +450,8 @@ class FloatService : Service() {
 
     private fun refreshTextOnly() {
         ansContentTv?.text = ansContent
-        ansTitleTv?.text = extractTitle(ansContent)
+        ansTitleTv?.text = answerSummary
+        selAnswerTv?.text = answerSummary
     }
 
     private fun extractTitle(content: String): String {
@@ -519,10 +562,13 @@ class FloatService : Service() {
     private var lastAutoRecognizeTime: Long = 0
     private var lastChangeTime: Long = 0
     private var lastSetupError: String? = null
+    private var pendingFrameHash: Long = 0
+    private var stableFrameCount = 0
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
             Log.w(TAG, "MediaProjection onStop")
+            diag("projection-stop", "captureSetup=$captureSetupDone inFlight=$recognitionInFlight")
             captureSetupDone = false
             mediaProjection = null
         }
@@ -554,25 +600,33 @@ class FloatService : Service() {
                             if (isCapturing && capturedBitmap == null) {
                                 capturedBitmap = imageToBitmap(img)
                             } else if (isMonitoring) {
-                                isMonitoring = false
                                 val newHash = computeFrameHash(img)
-                                if (newHash != lastFrameHash) {
-                                    // 画面发生变化，记录变化时刻，等待稳定后再触发
-                                    lastChangeTime = System.currentTimeMillis()
-                                    lastFrameHash = newHash
-                                } else if (lastFrameHash != 0L && lastChangeTime != 0L) {
-                                    // 画面已稳定（连续多帧哈希一致），且已超过稳定等待与冷却
-                                    val now = System.currentTimeMillis()
-                                    if (now - lastChangeTime > 200 && now - lastAutoRecognizeTime > 800) {
+                                val now = System.currentTimeMillis()
+                                if (newHash != pendingFrameHash) {
+                                    pendingFrameHash = newHash
+                                    stableFrameCount = 0
+                                    lastChangeTime = now
+                                } else if (pendingFrameHash != 0L) {
+                                    stableFrameCount++
+                                    if (lastFrameHash != pendingFrameHash &&
+                                        stableFrameCount >= 2 &&
+                                        now - lastChangeTime >= 250 &&
+                                        now - lastAutoRecognizeTime >= 900
+                                    ) {
+                                        lastFrameHash = pendingFrameHash
                                         lastAutoRecognizeTime = now
-                                        lastChangeTime = 0 // 复位，避免重复触发
+                                        lastChangeTime = 0
+                                        stableFrameCount = 0
+                                        isMonitoring = false
                                         handler.post { performRecognition(autoRecognize = true) }
                                     }
                                 }
                             }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "onImageAvailable error", e)
-                        } finally {
+                    } catch (e: Exception) {
+                        Log.e(TAG, "onImageAvailable error", e)
+                        diag("image-reader", "frame processing failed capturing=$isCapturing monitoring=$isMonitoring", e)
+                    } finally {
+
                             img.close()
                         }
                     }
@@ -599,14 +653,16 @@ class FloatService : Service() {
     }
 
     private fun performRecognition(autoRecognize: Boolean = false) {
+        diag("recognition-start", "auto=$autoRecognize generation=${recognitionGeneration + 1} setup=$captureSetupDone")
         hideSel()
         stopMonitoring()
         if (mediaProjection == null) {
             updateAnswer("请先授权截图权限")
             return
         }
-        if (isCapturing) {
+        if (recognitionInFlight) {
             if (!autoRecognize) updateAnswer("正在识别中，请稍候...")
+            else startMonitoring()
             return
         }
 
@@ -628,16 +684,24 @@ class FloatService : Service() {
             }
         }
 
+        val generation = ++recognitionGeneration
+        activeRecognitionGeneration = generation
+        recognitionInFlight = true
         isCapturing = true
+        capturedBitmap?.let { if (!it.isRecycled) it.recycle() }
         capturedBitmap = null
 
-        handler.postDelayed({
-            if (isCapturing) {
-                Log.w(TAG, "performRecognition: force reset after 10s timeout")
+        recognitionTimeout?.let { handler.removeCallbacks(it) }
+        recognitionTimeout = Runnable {
+            if (recognitionInFlight && activeRecognitionGeneration == generation) {
+                Log.w(TAG, "recognition timeout generation=$generation")
+                diag("recognition-timeout", "generation=$generation auto=$autoRecognize")
+                recognitionInFlight = false
                 isCapturing = false
                 if (autoRecognize) startMonitoring()
             }
-        }, 10000)
+        }
+        handler.postDelayed(recognitionTimeout!!, 10000)
 
         val dm = DisplayMetrics()
         wm?.defaultDisplay?.getRealMetrics(dm)
@@ -648,14 +712,20 @@ class FloatService : Service() {
         }
         // 自动识别时不改变面板文字，避免闪烁，仅后台处理
 
-        waitForCaptureAndOcr(0, autoRecognize)
+        waitForCaptureAndOcr(0, autoRecognize, generation)
     }
 
-    private fun waitForCaptureAndOcr(retry: Int, autoRecognize: Boolean = false) {
+    private fun waitForCaptureAndOcr(
+        retry: Int,
+        autoRecognize: Boolean = false,
+        generation: Long = activeRecognitionGeneration
+    ) {
         handler.postDelayed({
+            if (generation != activeRecognitionGeneration || !recognitionInFlight) return@postDelayed
             val bmp = capturedBitmap
             if (bmp != null) {
                 capturedBitmap = null
+                var cropped: Bitmap? = null
                 try {
                     // 使用 bitmap 实际尺寸作为基准计算缩放比，避免 screenW/screenH 与 ImageReader 不一致
                     val sw = bmp.width.toFloat(); val sh = bmp.height.toFloat()
@@ -671,24 +741,24 @@ class FloatService : Service() {
                     val iy = (cy + inset).coerceIn(0, bmp.height - 1)
                     val iw = (cw - inset * 2).coerceAtLeast(1)
                     val ih = (ch - inset * 2).coerceAtLeast(1)
-                    val cropped = if (iw > 0 && ih > 0)
+                    cropped = if (iw > 0 && ih > 0)
                         Bitmap.createBitmap(bmp, ix, iy, iw, ih)
                     else bmp
                     if (cropped !== bmp) bmp.recycle()
-                    ocr(cropped, autoRecognize)
+                    isCapturing = false
+                    ocr(cropped, autoRecognize, generation)
                 } catch (e: Exception) {
                     Log.e(TAG, "waitForCapture crop error", e)
+                    if (cropped != null && cropped !== bmp && !cropped!!.isRecycled) cropped!!.recycle()
+                    if (!bmp.isRecycled) bmp.recycle()
+                    finishRecognition(generation, autoRecognize)
                     if (!autoRecognize) updateAnswer("截图失败: ${e.message}")
-                    else startMonitoring()
-                } finally {
-                    isCapturing = false
                 }
             } else if (retry < 5) {
-                waitForCaptureAndOcr(retry + 1, autoRecognize)
+                waitForCaptureAndOcr(retry + 1, autoRecognize, generation)
             } else {
+                finishRecognition(generation, autoRecognize)
                 if (!autoRecognize) updateAnswer("截图失败：未收到屏幕画面（请重试）")
-                else startMonitoring()
-                isCapturing = false
             }
         }, 300)
     }
@@ -696,12 +766,13 @@ class FloatService : Service() {
     private fun startMonitoring() {
         if (!captureSetupDone || !ansVisible) return
         stopMonitoring()
-        lastFrameHash = 0
+        pendingFrameHash = 0
+        stableFrameCount = 0
         lastAutoRecognizeTime = System.currentTimeMillis()
         lastChangeTime = 0
         monitorRunnable = object : Runnable {
             override fun run() {
-                if (ansVisible && !isCapturing && !isMonitoring) {
+                if (ansVisible && !recognitionInFlight && !isCapturing && !isMonitoring) {
                     isMonitoring = true
                 }
                 handler.postDelayed(this, 300) // 300ms 轮询快速响应用户滑动切题
@@ -714,6 +785,8 @@ class FloatService : Service() {
         monitorRunnable?.let { handler.removeCallbacks(it) }
         monitorRunnable = null
         isMonitoring = false
+        pendingFrameHash = 0
+        stableFrameCount = 0
     }
 
     private fun computeFrameHash(img: Image): Long {
@@ -743,10 +816,16 @@ class FloatService : Service() {
     }
 
     private fun cleanupCaptureResources() {
-        try { virtualDisplay?.release() } catch (_: Exception) {}
+        diag("capture-cleanup", "setup=$captureSetupDone reader=${imageReader != null} display=${virtualDisplay != null}")
+        try { virtualDisplay?.release() } catch (error: Exception) { diag("capture-cleanup-display", "release failed", error) }
         try { imageReader?.close() } catch (_: Exception) {}
         try { captureThread?.quitSafely() } catch (_: Exception) {}
-        imageReader = null; virtualDisplay = null; capturedBitmap = null
+        imageReader = null; virtualDisplay = null
+        capturedBitmap?.let { if (!it.isRecycled) it.recycle() }
+        capturedBitmap = null
+        recognitionTimeout?.let { handler.removeCallbacks(it) }
+        recognitionTimeout = null
+        recognitionInFlight = false
         captureThread = null; captureHandler = null
         captureSetupDone = false
     }
@@ -857,37 +936,61 @@ class FloatService : Service() {
 
     /// 从 OCR 原始文本检测题型
     private fun detectQuestionType(ocrText: String): String {
+        val normalized = ocrText
+            .replace(Regex("[\\s　·•|丨]"), "")
+            .replace("选择题", "选择题")
+
+        // 页面题型标签优先，兼容 OCR 只识别出“单选/多选/判断”的情况。
+        if (normalized.contains("多选") || normalized.contains("可多选") ||
+            normalized.contains("多项选择") || normalized.contains("多项选择题")) {
+            return "multi"
+        }
+        if (normalized.contains("单选") || normalized.contains("单项选择") ||
+            normalized.contains("单项选择题")) {
+            return "single"
+        }
+        if (normalized.contains("判断题") || normalized.contains("判断")) {
+            return "judge"
+        }
+
         val lines = ocrText.split("\n").map { it.trim() }
-        var optionCount = 0
-        var judgeOptionCount = 0  // 选项文本本身包含"正确"/"错误"的个数
-        val optionPrefix = Regex("""^\s*[\(（]?[A-H][\)\)\.、．]\s*""")
+        val optionPrefix = Regex("""^\s*[\(（]?[A-H][\)\.、．:]\s*""")
+        val optionTexts = lines
+            .filter { optionPrefix.containsMatchIn(it) }
+            .map { optionPrefix.replaceFirst(it, "").trim() }
+            .filter { it.isNotEmpty() }
+        val judgeWords = setOf("正确", "错误", "对", "错", "是", "否")
 
-        for (line in lines) {
-            if (optionPrefix.containsMatchIn(line)) {
-                optionCount++
-                // 去掉选项前缀后检查选项文本是否包含"正确"或"错误"
-                val stripped = optionPrefix.replaceFirst(line, "").trim()
-                if (stripped.contains("正确") || stripped.contains("错误")) {
-                    judgeOptionCount++
-                }
-            }
+        // 只有所有有效选项都是完整判断词时，才认定为判断题。
+        if (optionTexts.size >= 2 && optionTexts.all { it in judgeWords }) {
+            return "judge"
         }
-
-        return when {
-            // 只有选项文本本身包含"正确"/"错误"时才判为判断题
-            optionCount == 2 && judgeOptionCount >= 2 -> "judge"
-            optionCount >= 3 -> "single"
-            else -> ""
-        }
+        // 没有明确标签时，两个及以上普通选项按单选处理，避免误判为判断题。
+        if (optionTexts.size >= 2) return "single"
+        return ""
     }
 
-    private fun ocr(bitmap: Bitmap, autoRecognize: Boolean = false) {
+    private fun finishRecognition(generation: Long, autoRecognize: Boolean) {
+        diag("recognition-finish", "generation=$generation active=$activeRecognitionGeneration auto=$autoRecognize")
+        if (generation != activeRecognitionGeneration) return
+        recognitionInFlight = false
+        isCapturing = false
+        recognitionTimeout?.let { handler.removeCallbacks(it) }
+        recognitionTimeout = null
+        if (autoRecognize) startMonitoring()
+    }
+
+    private fun ocr(bitmap: Bitmap, autoRecognize: Boolean = false, generation: Long = activeRecognitionGeneration) {
         textRecognizer.process(InputImage.fromBitmap(bitmap, 0))
             .addOnSuccessListener { t ->
+                if (generation != activeRecognitionGeneration) {
+                    if (!bitmap.isRecycled) bitmap.recycle()
+                    return@addOnSuccessListener
+                }
                 val rawText = t.text.trim()
                 if (rawText.isEmpty()) {
                     if (!autoRecognize) updateAnswer("未检测到文字")
-                    else startMonitoring()
+                    finishRecognition(generation, autoRecognize)
                 } else {
                     // 从原始 OCR 文本检测题型
                     val ocrType = detectQuestionType(rawText)
@@ -897,23 +1000,30 @@ class FloatService : Service() {
                     val chineseChars = questionText.count { it in '\u4e00'..'\u9fff' }
                     if (questionText.isBlank() || chineseChars < 3) {
                         updateAnswer("未检测到有效题目\n\n" + rawText.take(100))
-                        startMonitoring()
+                        finishRecognition(generation, autoRecognize)
                     } else {
-                        matchAndShow(questionText, ocrType)
+                        matchAndShow(questionText, ocrType, generation)
                     }
                 }
-                bitmap.recycle()
+                if (!bitmap.isRecycled) bitmap.recycle()
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "ocr: failed", e)
+                diag("ocr-failed", "generation=$generation auto=$autoRecognize", e)
                 if (!autoRecognize) updateAnswer("OCR 失败: ${e.message}")
-                else startMonitoring()
-                bitmap.recycle()
+                finishRecognition(generation, autoRecognize)
+                if (!bitmap.isRecycled) bitmap.recycle()
             }
     }
 
-    private fun matchAndShow(ocrText: String, ocrType: String = "") {
-        val args = mapOf("text" to ocrText, "type" to ocrType)
+    private fun matchAndShow(
+        ocrText: String,
+        ocrType: String = "",
+        generation: Long = activeRecognitionGeneration,
+        autoRecognize: Boolean = false
+    ) {
+        if (generation != activeRecognitionGeneration) return
+        val args = mapOf("text" to ocrText, "type" to ocrType, "generation" to generation)
         // 通道为空时先尝试重建，再取值
         val ch = recognitionChannel ?: run {
             setupRecognitionChannel()
@@ -921,21 +1031,24 @@ class FloatService : Service() {
         }
         if (ch != null) {
             try {
+                pendingAutoQuestionSignature = if (autoRecognize) normalizeQuestionSignature(ocrText) else null
+                pendingForceRefresh = !autoRecognize
                 ch.invokeMethod("recognize", args)
-                if (!ansContent.startsWith("识别中")) {
+                if (!autoRecognize && !ansContent.startsWith("识别中")) {
                     handler.post {
                         ansContent = "匹配中..."
                         refreshAnswerPanel()
                     }
                 }
-                handler.postDelayed({
-                    if (ansContent == "匹配中...") {
+                recognitionTimeout?.let { handler.removeCallbacks(it) }
+                recognitionTimeout = Runnable {
+                    if (generation == activeRecognitionGeneration && recognitionInFlight) {
                         ansContent = "识别结果（匹配超时）\n\n$ocrText"
                         refreshAnswerPanel()
-                        // 匹配超时后重启监控，确保后续滑动屏幕能触发重新识别
-                        startMonitoring()
+                        finishRecognition(generation, autoRecognize = true)
                     }
-                }, 5000)
+                }
+                handler.postDelayed(recognitionTimeout!!, 5000)
                 return
             } catch (e: Exception) {
                 Log.e(TAG, "matchAndShow: invoke recognize failed", e)
@@ -971,7 +1084,7 @@ class FloatService : Service() {
             }
         } else {
             sb.append(text).append("\n\n")
-            sb.append("\u2713 正确答案：").append(answer)
+            sb.append("\u2713 正确答案：").append(formatAnswerForDisplay(answer))
             if (explanation.isNotEmpty()) {
                 sb.append("\n\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n")
                 sb.append("解析：\n").append(explanation)
@@ -981,6 +1094,30 @@ class FloatService : Service() {
             }
         }
         return sb.toString()
+    }
+
+    private fun formatAnswerForDisplay(answer: String): String {
+        val original = answer.trim()
+        if (original.isEmpty()) return original
+
+        val markerPattern = Regex("""(?<![A-Z])([A-D]{1,4})(?=\s|[.、．。:：)）]|$)""")
+        val letters = linkedSetOf<Char>()
+        markerPattern.findAll(original.uppercase()).forEach { match ->
+            match.groupValues[1].forEach { letters.add(it) }
+        }
+        return if (letters.isEmpty()) original else letters.joinToString("")
+    }
+
+    private fun formatAnswerSummary(answer: String, level: String): String {
+        if (level == "none" || answer.isBlank()) return "正确答案：--"
+        return "正确答案：${formatAnswerForDisplay(answer)}"
+    }
+
+    private fun normalizeQuestionSignature(text: String): String {
+        return text.uppercase()
+            .replace(Regex("\\s+"), "")
+            .replace(Regex("[，。！？、；：,.!?;:()（）\\[\\]【】]"), "")
+            .trim()
     }
 
     private fun updateAnswer(text: String) {

@@ -432,6 +432,13 @@ void main() {
       expect(QuestionPair.inferType('ABC'), 'multi');
       expect(QuestionPair.inferType('ABD'), 'multi');
       expect(QuestionPair.inferType('ABCD'), 'multi');
+      expect(QuestionPair.inferType('A. 苹果；C. 香蕉'), 'multi');
+    });
+
+    test('题型推断 - 带选项内容的单选答案应推断为 single', () {
+      expect(QuestionPair.inferType('A. 北京'), 'single');
+      expect(QuestionPair.inferType('B、上海'), 'single');
+      expect(QuestionPair.inferType('C: 广州'), 'single');
     });
 
     test('题型推断 - 判断题应推断为 judge', () {
@@ -452,6 +459,19 @@ void main() {
       final result = engine.match('中国的首都是哪个城市？', ocrType: 'single');
       expect(result.level, MatchLevel.exact);
       expect(result.answer, 'A');
+    });
+
+    test('题型过滤 - 多选题文本应只匹配多选题', () {
+      final result = engine.match('以下哪些是水果？', ocrType: 'multi');
+      expect(result.level, MatchLevel.exact);
+      expect(result.answer, 'ABD');
+    });
+
+    test('题型过滤 - 多选题文本不应匹配单选题或判断题', () {
+      final singleResult = engine.match('以下哪些是水果？', ocrType: 'single');
+      final judgeResult = engine.match('以下哪些是水果？', ocrType: 'judge');
+      expect(singleResult.answer, isNot('ABD'));
+      expect(judgeResult.answer, isNot('ABD'));
     });
 
     test('题型过滤 - 判断题文本应只匹配判断题', () {
@@ -485,8 +505,7 @@ void main() {
       expect(result.answer, 'A');
     });
 
-    test('题型过滤 - 未知题型应匹配所有题型', () {
-      // ocrType 为空字符串时不应过滤
+    test('题型过滤 - 未知 OCR 题型不应进入跨题型模糊匹配', () {
       final result = engine.match('中国的首都是哪个城市？', ocrType: '');
       expect(result.level, MatchLevel.exact);
       expect(result.answer, 'A');

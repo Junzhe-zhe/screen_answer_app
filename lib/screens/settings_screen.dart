@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/diagnostic_log_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -52,6 +53,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _defaultLock = value);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyDefaultLock, value);
+  }
+
+  Future<void> _showDiagnosticLog() async {
+    final content = await DiagnosticLogService.read();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('异常诊断日志'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 420,
+          child: SingleChildScrollView(
+            child: SelectableText(content.isEmpty ? '暂无日志' : content),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('关闭')),
+        ],
+      ),
+    );
   }
 
   @override
@@ -117,6 +139,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const ListTile(
             title: Text('版本'),
             subtitle: Text('1.0.0'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.bug_report_outlined),
+            title: const Text('查看异常诊断日志'),
+            subtitle: const Text('卡顿或闪退后可复制日志内容反馈'),
+            onTap: _showDiagnosticLog,
           ),
         ],
       ),

@@ -28,7 +28,10 @@ void main() {
         {'q': '第二题内容', 'a': '答案二'},
         {'q': '第三题内容', 'a': '答案三'},
       ]);
-      final result = await FileImportService.importFile(toBytes(json), 'questions.json');
+      final result = await FileImportService.importFile(
+        toBytes(json),
+        'questions.json',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 3);
       expect(result.questions[0].question, '第一题内容');
@@ -39,7 +42,10 @@ void main() {
       final json = jsonEncode([
         {'question': '测试题目', 'answer': '测试答案'},
       ]);
-      final result = await FileImportService.importFile(toBytes(json), 'test.json');
+      final result = await FileImportService.importFile(
+        toBytes(json),
+        'test.json',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1);
       expect(result.questions[0].question, '测试题目');
@@ -52,37 +58,48 @@ void main() {
         {'q': '空答案', 'a': ''},
         {'q': '', 'a': ''},
       ]);
-      final result = await FileImportService.importFile(toBytes(json), 'test.json');
+      final result = await FileImportService.importFile(
+        toBytes(json),
+        'test.json',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1); // 只有第一个有效
     });
 
     test('空 JSON 数组', () async {
-      final result = await FileImportService.importFile(toBytes('[]'), 'empty.json');
+      final result = await FileImportService.importFile(
+        toBytes('[]'),
+        'empty.json',
+      );
       expect(result.error, isNull);
       expect(result.questions, isEmpty);
     });
 
     test('无效 JSON 应返回错误', () async {
-      final result = await FileImportService.importFile(toBytes('{invalid json}'), 'bad.json');
+      final result = await FileImportService.importFile(
+        toBytes('{invalid json}'),
+        'bad.json',
+      );
       expect(result.error, isNotNull);
       expect(result.error, contains('JSON 解析失败'));
     });
 
     test('非数组 JSON 应返回错误', () async {
-      final result = await FileImportService.importFile(toBytes('{"key": "value"}'), 'obj.json');
+      final result = await FileImportService.importFile(
+        toBytes('{"key": "value"}'),
+        'obj.json',
+      );
       expect(result.error, isNotNull);
     });
 
     test('JSON 含 explanation 字段应被正确解析', () async {
       final json = jsonEncode([
-        {
-          'q': '带解析的题目',
-          'a': '答案',
-          'explanation': '详细解题步骤...',
-        },
+        {'q': '带解析的题目', 'a': '答案', 'explanation': '详细解题步骤...'},
       ]);
-      final result = await FileImportService.importFile(toBytes(json), 'with_explanation.json');
+      final result = await FileImportService.importFile(
+        toBytes(json),
+        'with_explanation.json',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1);
       expect(result.questions[0].explanation, '详细解题步骤...');
@@ -90,13 +107,12 @@ void main() {
 
     test('JSON 解析 - 中文解析字段名', () async {
       final json = jsonEncode([
-        {
-          'q': '带解析的题目',
-          'a': '答案',
-          '解析': '中文解析字段',
-        },
+        {'q': '带解析的题目', 'a': '答案', '解析': '中文解析字段'},
       ]);
-      final result = await FileImportService.importFile(toBytes(json), 'with_explanation.json');
+      final result = await FileImportService.importFile(
+        toBytes(json),
+        'with_explanation.json',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1);
       expect(result.questions[0].explanation, '中文解析字段');
@@ -104,13 +120,12 @@ void main() {
 
     test('JSON 解析 - 空 explanation 应为 null', () async {
       final json = jsonEncode([
-        {
-          'q': '无解析题目',
-          'a': '答案',
-          'explanation': '',
-        },
+        {'q': '无解析题目', 'a': '答案', 'explanation': ''},
       ]);
-      final result = await FileImportService.importFile(toBytes(json), 'empty_explanation.json');
+      final result = await FileImportService.importFile(
+        toBytes(json),
+        'empty_explanation.json',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1);
       expect(result.questions[0].explanation, isNull);
@@ -120,20 +135,26 @@ void main() {
       final json = jsonEncode([
         {'q': '带解析的题目', 'a': '答案', '解析说明': '说明文字'},
       ]);
-      final result = await FileImportService.importFile(toBytes(json), 'shuoming.json');
+      final result = await FileImportService.importFile(
+        toBytes(json),
+        'shuoming.json',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1);
       expect(result.questions[0].explanation, '说明文字');
     });
 
     test('大 JSON 文件导入', () async {
-      final items = List.generate(1000, (i) => {
-        'q': '第${i + 1}题：测试题目内容',
-        'a': '答案$i',
-      });
+      final items = List.generate(
+        1000,
+        (i) => {'q': '第${i + 1}题：测试题目内容', 'a': '答案$i'},
+      );
       final json = jsonEncode(items);
       final stopwatch = Stopwatch()..start();
-      final result = await FileImportService.importFile(toBytes(json), 'large.json');
+      final result = await FileImportService.importFile(
+        toBytes(json),
+        'large.json',
+      );
       stopwatch.stop();
       expect(result.error, isNull);
       expect(result.questions.length, 1000);
@@ -145,10 +166,14 @@ void main() {
 
   group('FileImportService - CSV 导入', () {
     test('标准 CSV 格式 - 英文列名', () async {
-      final csv = 'question,answer\n'
+      final csv =
+          'question,answer\n'
           '第一题,答案一\n'
           '第二题,答案二\n';
-      final result = await FileImportService.importFile(toBytes(csv), 'questions.csv');
+      final result = await FileImportService.importFile(
+        toBytes(csv),
+        'questions.csv',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 2);
       expect(result.questions[0].question, '第一题');
@@ -156,40 +181,58 @@ void main() {
     });
 
     test('中文列名 - 题目/答案', () async {
-      final csv = '题目,答案\n'
+      final csv =
+          '题目,答案\n'
           '测试题目,测试答案\n';
-      final result = await FileImportService.importFile(toBytes(csv), 'test.csv');
+      final result = await FileImportService.importFile(
+        toBytes(csv),
+        'test.csv',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1);
     });
 
     test('无表头 CSV - 默认使用第1、2列', () async {
-      final csv = '第一题,答案一\n'
+      final csv =
+          '第一题,答案一\n'
           '第二题,答案二\n';
-      final result = await FileImportService.importFile(toBytes(csv), 'no_header.csv');
+      final result = await FileImportService.importFile(
+        toBytes(csv),
+        'no_header.csv',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 2);
     });
 
     test('空行应被跳过', () async {
-      final csv = 'question,answer\n'
+      final csv =
+          'question,answer\n'
           '第一题,答案一\n'
           ',\n'
           '第二题,答案二\n'
           ',\n';
-      final result = await FileImportService.importFile(toBytes(csv), 'test.csv');
+      final result = await FileImportService.importFile(
+        toBytes(csv),
+        'test.csv',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 2);
     });
 
     test('空 CSV 文件', () async {
-      final result = await FileImportService.importFile(toBytes(''), 'empty.csv');
+      final result = await FileImportService.importFile(
+        toBytes(''),
+        'empty.csv',
+      );
       expect(result.error, isNotNull);
     });
 
     test('Windows CRLF 换行符', () async {
       final csv = 'question,answer\r\n第一题,答案一\r\n第二题,答案二\r\n';
-      final result = await FileImportService.importFile(toBytes(csv), 'crlf.csv');
+      final result = await FileImportService.importFile(
+        toBytes(csv),
+        'crlf.csv',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 2);
       expect(result.questions[0].answer, '答案一');
@@ -198,17 +241,25 @@ void main() {
     test('CSV 含 BOM 头', () async {
       // UTF-8 BOM: \xEF\xBB\xBF
       final bom = '\uFEFF';
-      final csv = '${bom}question,answer\n'
+      final csv =
+          '${bom}question,answer\n'
           '第一题,答案一\n';
-      final result = await FileImportService.importFile(toBytes(csv), 'bom.csv');
+      final result = await FileImportService.importFile(
+        toBytes(csv),
+        'bom.csv',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1);
     });
 
     test('CSV 含引号包裹的字段', () async {
-      final csv = 'question,answer\n'
+      final csv =
+          'question,answer\n'
           '"包含,逗号的题目","包含,逗号的答案"\n';
-      final result = await FileImportService.importFile(toBytes(csv), 'quoted.csv');
+      final result = await FileImportService.importFile(
+        toBytes(csv),
+        'quoted.csv',
+      );
       expect(result.error, isNull);
       expect(result.questions.length, 1);
       expect(result.questions[0].question, '包含,逗号的题目');
@@ -255,9 +306,12 @@ void main() {
 
       // 构建 sheet1.xml — 使用共享字符串引用
       final sheetBuf = StringBuffer();
-      sheetBuf.writeln('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
       sheetBuf.writeln(
-          '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">');
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      );
+      sheetBuf.writeln(
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+      );
       sheetBuf.writeln('<sheetData>');
       for (var r = 0; r < rows.length; r++) {
         final row = rows[r];
@@ -266,8 +320,7 @@ void main() {
           final colLetter = entry.key;
           final value = entry.value;
           final idx = getIndex(value);
-          sheetBuf.writeln(
-              '<c r="$colLetter${r + 1}" t="s"><v>$idx</v></c>');
+          sheetBuf.writeln('<c r="$colLetter${r + 1}" t="s"><v>$idx</v></c>');
         }
         sheetBuf.writeln('</row>');
       }
@@ -276,10 +329,10 @@ void main() {
 
       // 构建 sharedStrings.xml
       final ssBuf = StringBuffer();
+      ssBuf.writeln('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
       ssBuf.writeln(
-          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
-      ssBuf.writeln(
-          '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${sharedStrings.length}" uniqueCount="${sharedStrings.length}">');
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${sharedStrings.length}" uniqueCount="${sharedStrings.length}">',
+      );
       for (final s in sharedStrings) {
         ssBuf.writeln('<si><t>${xmlEscape(s)}</t></si>');
       }
@@ -287,70 +340,109 @@ void main() {
 
       // 构建 [Content_Types].xml
       final ctBuf = StringBuffer();
+      ctBuf.writeln('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
       ctBuf.writeln(
-          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+      );
       ctBuf.writeln(
-          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">');
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+      );
+      ctBuf.writeln('<Default Extension="xml" ContentType="application/xml"/>');
       ctBuf.writeln(
-          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>');
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
+      );
       ctBuf.writeln(
-          '<Default Extension="xml" ContentType="application/xml"/>');
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
+      );
       ctBuf.writeln(
-          '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>');
-      ctBuf.writeln(
-          '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>');
-      ctBuf.writeln(
-          '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>');
+        '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>',
+      );
       ctBuf.writeln('</Types>');
 
       // 构建 _rels/.rels
       final relsBuf = StringBuffer();
       relsBuf.writeln(
-          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      );
       relsBuf.writeln(
-          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">');
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+      );
       relsBuf.writeln(
-          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>');
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>',
+      );
       relsBuf.writeln('</Relationships>');
 
       // 构建 xl/workbook.xml
       final wbBuf = StringBuffer();
+      wbBuf.writeln('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
       wbBuf.writeln(
-          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
-      wbBuf.writeln(
-          '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">');
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+      );
       wbBuf.writeln('<sheets>');
-      wbBuf.writeln(
-          '<sheet name="Sheet1" sheetId="1" r:id="rId1"/>');
+      wbBuf.writeln('<sheet name="Sheet1" sheetId="1" r:id="rId1"/>');
       wbBuf.writeln('</sheets>');
       wbBuf.writeln('</workbook>');
 
       // 构建 xl/_rels/workbook.xml.rels
       final wbRelsBuf = StringBuffer();
       wbRelsBuf.writeln(
-          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+      );
       wbRelsBuf.writeln(
-          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">');
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+      );
       wbRelsBuf.writeln(
-          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>');
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>',
+      );
       wbRelsBuf.writeln(
-          '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>');
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>',
+      );
       wbRelsBuf.writeln('</Relationships>');
 
       // 用 archive 包构建 ZIP
       final archive = Archive();
-      archive.addFile(ArchiveFile(
-          '[Content_Types].xml', ctBuf.length, utf8.encode(ctBuf.toString())));
-      archive.addFile(ArchiveFile(
-          '_rels/.rels', relsBuf.length, utf8.encode(relsBuf.toString())));
-      archive.addFile(ArchiveFile('xl/workbook.xml', wbBuf.length,
-          utf8.encode(wbBuf.toString())));
-      archive.addFile(ArchiveFile('xl/_rels/workbook.xml.rels',
-          wbRelsBuf.length, utf8.encode(wbRelsBuf.toString())));
-      archive.addFile(ArchiveFile('xl/worksheets/sheet1.xml',
-          sheetBuf.length, utf8.encode(sheetBuf.toString())));
-      archive.addFile(ArchiveFile('xl/sharedStrings.xml', ssBuf.length,
-          utf8.encode(ssBuf.toString())));
+      archive.addFile(
+        ArchiveFile(
+          '[Content_Types].xml',
+          ctBuf.length,
+          utf8.encode(ctBuf.toString()),
+        ),
+      );
+      archive.addFile(
+        ArchiveFile(
+          '_rels/.rels',
+          relsBuf.length,
+          utf8.encode(relsBuf.toString()),
+        ),
+      );
+      archive.addFile(
+        ArchiveFile(
+          'xl/workbook.xml',
+          wbBuf.length,
+          utf8.encode(wbBuf.toString()),
+        ),
+      );
+      archive.addFile(
+        ArchiveFile(
+          'xl/_rels/workbook.xml.rels',
+          wbRelsBuf.length,
+          utf8.encode(wbRelsBuf.toString()),
+        ),
+      );
+      archive.addFile(
+        ArchiveFile(
+          'xl/worksheets/sheet1.xml',
+          sheetBuf.length,
+          utf8.encode(sheetBuf.toString()),
+        ),
+      );
+      archive.addFile(
+        ArchiveFile(
+          'xl/sharedStrings.xml',
+          ssBuf.length,
+          utf8.encode(ssBuf.toString()),
+        ),
+      );
 
       final zipBytes = ZipEncoder().encode(archive);
       return Uint8List.fromList(zipBytes ?? []);
@@ -423,14 +515,13 @@ void main() {
           'A': '以下哪个是 Flutter 的编程语言？',
           'B': 'A. Java\$;B. Dart\$;C. Python\$;D. C++',
           'C': 'B',
-          'D': 'Flutter 使用 Dart 语言开发'
+          'D': 'Flutter 使用 Dart 语言开发',
         },
       ]);
       final result = await FileImportService.importFile(xlsx, 'test.xlsx');
       expect(result.error, isNull);
       expect(result.questions.length, 1);
-      expect(result.questions[0].question,
-          contains('以下哪个是 Flutter 的编程语言？'));
+      expect(result.questions[0].question, contains('以下哪个是 Flutter 的编程语言？'));
       expect(result.questions[0].question, contains('A. A. Java'));
       expect(result.questions[0].question, contains('B. B. Dart'));
       expect(result.questions[0].question, contains('C. C. Python'));
@@ -457,11 +548,7 @@ void main() {
     test('国网模板 - 答案字母超出选项范围时回退为字母', () async {
       final xlsx = createXlsx([
         {'A': '试题正文', 'B': '试题选项', 'C': '试题答案'},
-        {
-          'A': '测试题目',
-          'B': 'A. 选项一\$;B. 选项二',
-          'C': 'Z',
-        },
+        {'A': '测试题目', 'B': 'A. 选项一\$;B. 选项二', 'C': 'Z'},
       ]);
       final result = await FileImportService.importFile(xlsx, 'test.xlsx');
       expect(result.error, isNull);
@@ -487,8 +574,7 @@ void main() {
       final result = await FileImportService.importFile(xlsx, 'test.xlsx');
       expect(result.error, isNull);
       expect(result.questions.length, 1);
-      expect(result.questions[0].question,
-          contains('信息系统故障紧急抢修时，工作票应经谁同意？'));
+      expect(result.questions[0].question, contains('信息系统故障紧急抢修时，工作票应经谁同意？'));
       expect(result.questions[0].question, contains('A. 工作许可人'));
       expect(result.questions[0].question, contains('B. 工作票签发人'));
       expect(result.questions[0].question, contains('C. 信息运维部门'));
@@ -518,12 +604,7 @@ void main() {
     test('国网模板 - 选项分散列布局（判断题2项）', () async {
       final xlsx = createXlsx([
         {'G': '试题正文', 'H': '试题选项', 'I': '试题答案', 'J': '', 'K': '', 'L': ''},
-        {
-          'G': 'Flutter 使用 Dart 语言开发',
-          'H': '正确',
-          'I': '错误',
-          'L': 'A',
-        },
+        {'G': 'Flutter 使用 Dart 语言开发', 'H': '正确', 'I': '错误', 'L': 'A'},
       ]);
       final result = await FileImportService.importFile(xlsx, 'test.xlsx');
       expect(result.error, isNull);
@@ -564,18 +645,14 @@ void main() {
     });
 
     test('QuestionItem 无 explanation 时 Question.explanation 应为 null', () {
-      final items = [
-        QuestionItem(question: '测试题目', answer: '测试答案'),
-      ];
+      final items = [QuestionItem(question: '测试题目', answer: '测试答案')];
       final questions = FileImportService.toDbQuestions(items, 'bank-1');
       expect(questions.length, 1);
       expect(questions[0].explanation, isNull);
     });
 
     test('preprocessedText 应被正确生成', () {
-      final items = [
-        QuestionItem(question: 'Hello World', answer: 'Greeting'),
-      ];
+      final items = [QuestionItem(question: 'Hello World', answer: 'Greeting')];
       final questions = FileImportService.toDbQuestions(items, 'bank-1');
       // 强过滤管线：转换为大写且拼接时不保留空格
       expect(questions[0].preprocessedText, 'HELLOWORLD');
@@ -596,7 +673,10 @@ void main() {
 
   group('FileImportService - 错误处理', () {
     test('空字节数组', () async {
-      final result = await FileImportService.importFile(Uint8List(0), 'test.json');
+      final result = await FileImportService.importFile(
+        Uint8List(0),
+        'test.json',
+      );
       expect(result.error, isNotNull);
     });
 
@@ -610,7 +690,8 @@ void main() {
 
     test('超大文件不应崩溃', () async {
       // 模拟 10MB 的 JSON
-      final largeContent = '[${List.generate(50000, (i) => '{"q":"q$i","a":"a$i"}').join(',')}]';
+      final largeContent =
+          '[${List.generate(50000, (i) => '{"q":"q$i","a":"a$i"}').join(',')}]';
       final bytes = toBytes(largeContent);
       final stopwatch = Stopwatch()..start();
       final result = await FileImportService.importFile(bytes, 'large.json');
