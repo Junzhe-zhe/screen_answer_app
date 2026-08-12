@@ -21,8 +21,9 @@ class _BankListScreenState extends State<BankListScreen> {
   }
 
   Future<void> _loadBanks() async {
-    setState(() => _loading = true);
+    if (mounted) setState(() => _loading = true);
     final banks = await DatabaseService.getBanks();
+    if (!mounted) return;
     setState(() {
       _banks = banks;
       _loading = false;

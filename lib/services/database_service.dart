@@ -1,3 +1,6 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:uuid/uuid.dart';
@@ -9,6 +12,31 @@ class DatabaseService {
   static Database? _database;
   static const _uuid = Uuid();
   static const _dbVersion = 3;
+
+  /// 仅用于单元测试：关闭并清空缓存的数据库实例，同时删除数据库文件，
+  /// 保证每个测试用例从全新的数据库开始（避免数据残留导致断言失败）。
+  @visibleForTesting
+  static Future<void> resetForTest() async {
+    final db = _database;
+    _database = null;
+    await db?.close();
+    try {
+      final dbPath = await getDatabasesPath();
+      final file = File(join(dbPath, 'screen_answer.db'));
+      if (await file.exists()) await file.delete();
+    } catch (_) {
+      // 删除失败不影响测试主体逻辑
+    }
+  }
+
+  /// 仅用于单元测试：暴露真实的 _onUpgrade 迁移逻辑，供版本迁移测试驱动。
+  @visibleForTesting
+  static Future<void> onUpgradeForTest(
+    Database db,
+    int oldVersion,
+    int newVersion,
+  ) =>
+      _onUpgrade(db, oldVersion, newVersion);
 
   static Future<Database> get database async {
     if (_database != null) return _database!;
@@ -145,13 +173,16 @@ class DatabaseService {
 
   static Future<void> setDefaultBank(String bankId) async {
     final db = await database;
-    await db.update('question_banks', {'is_default': 0});
-    await db.update(
-      'question_banks',
-      {'is_default': 1},
-      where: 'id = ?',
-      whereArgs: [bankId],
-    );
+    // 两步更新必须在同一事务中：防止步骤1成功、步骤2前崩溃导致所有题库都非默认
+    await db.transaction((txn) async {
+      await txn.update('question_banks', {'is_default': 0});
+      await txn.update(
+        'question_banks',
+        {'is_default': 1},
+        where: 'id = ?',
+        whereArgs: [bankId],
+      );
+    });
   }
 
   // ==================== 题目 CRUD ====================

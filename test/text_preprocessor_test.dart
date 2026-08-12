@@ -240,4 +240,65 @@ void main() {
       expect(result, 'TCP IP 协议是什么');
     });
   });
+
+  group('TextPreprocessor - OCR 乱码噪声过滤', () {
+    test('题型标签乱码 2斩题 多造 应被过滤', () {
+      final result = TextPreprocessor.preprocess('2斩题 多造根据信息安规规定，以下属于工作班成员的安全责任有');
+      // '斩题'/'多造' 是 OCR 把"多选题"误识别成的乱码，应被过滤
+      expect(result, isNot(contains('斩')));
+      expect(result, isNot(contains('造')));
+      expect(result, contains('根据信息安规规定'));
+    });
+
+    test('乱码前缀 服漫食丁旨力 应被过滤', () {
+      final result = TextPreprocessor.preprocess('服漫食丁旨力 根据信息安规规定，以下属于工作班成员的安全责任有');
+      expect(result, isNot(contains('服漫')));
+      expect(result, contains('根据信息安规规定'));
+    });
+
+    test('多逸 变体应被过滤', () {
+      final result = TextPreprocessor.preprocess('多逸 以下哪些是编程语言');
+      expect(result, isNot(contains('多逸')));
+      expect(result, contains('以下哪些是编程语言'));
+    });
+
+    test('正常含"多选"的题目文本不应被误伤', () {
+      final result = TextPreprocessor.preprocess('以下哪些是编程语言，可以多选');
+      // '多选' 本身是合法词，不应被过滤（'多造'/'多逸' 才是乱码）
+      expect(result, contains('多选'));
+    });
+  });
+
+  group('TextPreprocessor - 实际 OCR 乱码场景', () {
+    test('&斩题 多选 前缀应被清理且保留题干', () {
+      final input = '&斩题 多选根据信息安规规定,以下届于工作班 成员的安全青任有()。 熟悉工作内容、工作流程,清楚工作 A中的风险点和安全措施,并在工作票 上签名确认';
+      final result = TextPreprocessor.preprocess(input);
+      expect(result, isNot(contains('斩')));
+      expect(result, contains('根据信息安规规定'));
+      expect(result, contains('工作票'));
+    });
+
+    test('繁体 熱 应转换为 热（OCR 将"熟"识别为"熱"）', () {
+      final result = TextPreprocessor.preprocessRaw('熱悉工作内容');
+      expect(result, contains('热悉工作内容'));
+    });
+
+    test('繁体 責/範 应转换（届/青 是 OCR 错字非繁体，保持原样）', () {
+      expect(TextPreprocessor.preprocessRaw('安全責任'), contains('安全责任'));
+      expect(TextPreprocessor.preprocessRaw('在确定的作业範围内'), contains('在确定的作业范围内'));
+    });
+
+    test('行首 单选 标签应被清理', () {
+      final result = TextPreprocessor.preprocess('单选题\n中国的首都是哪个城市');
+      expect(result, isNot(contains('单选')));
+      expect(result, contains('中国的首都是哪个城市'));
+    });
+
+    test('行首 判断 标签应被清理', () {
+      final result = TextPreprocessor.preprocess('判断题\n地球是圆的');
+      expect(result, isNot(contains('判断')));
+      expect(result, contains('地球是圆的'));
+    });
+  });
 }
+

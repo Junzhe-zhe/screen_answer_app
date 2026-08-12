@@ -12,7 +12,11 @@ class QuestionItem {
   final String question;
   final String answer;
   final String? explanation;
-  QuestionItem({required this.question, required this.answer, this.explanation});
+  QuestionItem({
+    required this.question,
+    required this.answer,
+    this.explanation,
+  });
 }
 
 class ParseResult {
@@ -23,7 +27,9 @@ class ParseResult {
 
 class FileImportService {
   static Future<ParseResult> importFile(
-      Uint8List bytes, String fileName) async {
+    Uint8List bytes,
+    String fileName,
+  ) async {
     final ext = fileName.split('.').last.toLowerCase();
     switch (ext) {
       case 'json':
@@ -43,15 +49,24 @@ class FileImportService {
       final list = jsonDecode(text) as List<dynamic>;
       final questions = <QuestionItem>[];
       for (final item in list) {
-        final q = item['q'] ?? item['question'] ?? item['题目'] ?? item['问题'] ?? item['试题'] ?? '';
+        final q =
+            item['q'] ??
+            item['question'] ??
+            item['题目'] ??
+            item['问题'] ??
+            item['试题'] ??
+            '';
         final a = item['a'] ?? item['answer'] ?? item['答案'] ?? '';
-        final e = item['e'] ?? item['explanation'] ?? item['解析'] ?? item['解析说明'];
+        final e =
+            item['e'] ?? item['explanation'] ?? item['解析'] ?? item['解析说明'];
         if (q is String && a is String && q.isNotEmpty && a.isNotEmpty) {
-          questions.add(QuestionItem(
-            question: q,
-            answer: a,
-            explanation: e is String && e.isNotEmpty ? e : null,
-          ));
+          questions.add(
+            QuestionItem(
+              question: q,
+              answer: a,
+              explanation: e is String && e.isNotEmpty ? e : null,
+            ),
+          );
         }
       }
       return ParseResult(questions);
@@ -155,8 +170,9 @@ class FileImportService {
     final rows = <_Row>[];
     final rowRegex = RegExp(r'<row[^>]*>(.*?)</row>', dotAll: true);
     final cellRegex = RegExp(
-        r'(<c[^>]*r="([A-Z]+)(\d+)"[^>]*>(.*?)</c>)',
-        dotAll: true);
+      r'(<c[^>]*r="([A-Z]+)(\d+)"[^>]*>(.*?)</c>)',
+      dotAll: true,
+    );
 
     for (final rowMatch in rowRegex.allMatches(xml)) {
       final rowXml = rowMatch.group(1) ?? '';
@@ -174,7 +190,9 @@ class FileImportService {
 
   /// 检测是否为国网模板（找表头中是否包含"试题正文"）
   static bool _detectGuowangTemplate(
-      List<_Row> rows, List<String> sharedStrings) {
+    List<_Row> rows,
+    List<String> sharedStrings,
+  ) {
     for (var r = 0; r < 5 && r < rows.length; r++) {
       for (final entry in rows[r].cells.entries) {
         final value = _cellValue(entry.value, sharedStrings);
@@ -191,7 +209,9 @@ class FileImportService {
   /// 2. 分散列布局：选项分散在 oCol 及后续列，答案字母在更靠后的纯字母列
   ///    自动检测：首个数据行的 aCol 值若为纯字母 → 标准布局；否则 → 分散列布局
   static ParseResult _parseGuowangSheet(
-      List<_Row> rows, List<String> sharedStrings) {
+    List<_Row> rows,
+    List<String> sharedStrings,
+  ) {
     // 找表头行
     int headerRow = -1;
     for (var r = 0; r < 5 && r < rows.length; r++) {
@@ -217,9 +237,11 @@ class FileImportService {
 
     // 检测布局：首个数据行的 aCol 值若为纯字母 → 标准 $; 布局
     final firstDataRowIdx = headerRow + 1;
-    final isStandardLayout = firstDataRowIdx < rows.length &&
-        RegExp(r'^[A-Z]+$')
-            .hasMatch(rows[firstDataRowIdx].cellValue(aCol, sharedStrings));
+    final isStandardLayout =
+        firstDataRowIdx < rows.length &&
+        RegExp(
+          r'^[A-Z]+$',
+        ).hasMatch(rows[firstDataRowIdx].cellValue(aCol, sharedStrings));
 
     final questions = <QuestionItem>[];
 
@@ -243,10 +265,12 @@ class FileImportService {
         }
 
         final ansLetter = rows[r].cellValue(aCol, sharedStrings);
-        questions.add(QuestionItem(
-          question: _assembleQuestion(qText, options),
-          answer: _assembleAnswer(ansLetter, options),
-        ));
+        questions.add(
+          QuestionItem(
+            question: _assembleQuestion(qText, options),
+            answer: _assembleAnswer(ansLetter, options),
+          ),
+        );
       }
     } else {
       // === 分散列布局：选项分散在 oCol 及后续列，答案在纯字母列 ===
@@ -277,10 +301,12 @@ class FileImportService {
           options.add(val);
         }
 
-        questions.add(QuestionItem(
-          question: _assembleQuestion(qText, options),
-          answer: _assembleAnswer(ansLetter, options),
-        ));
+        questions.add(
+          QuestionItem(
+            question: _assembleQuestion(qText, options),
+            answer: _assembleAnswer(ansLetter, options),
+          ),
+        );
       }
     }
 
@@ -318,7 +344,9 @@ class FileImportService {
 
   /// 通用 Excel 解析
   static ParseResult _parseGenericSheet(
-      List<_Row> rows, List<String> sharedStrings) {
+    List<_Row> rows,
+    List<String> sharedStrings,
+  ) {
     if (rows.length < 2) return ParseResult([], '文件内容不足');
     final questions = <QuestionItem>[];
 
@@ -369,8 +397,10 @@ class FileImportService {
 
     // inline string (t="inlineStr")
     if (cellType == 'inlineStr') {
-      final inlineMatch =
-          RegExp(r'<t[^>]*>(.*?)</t>', dotAll: true).firstMatch(cellXml);
+      final inlineMatch = RegExp(
+        r'<t[^>]*>(.*?)</t>',
+        dotAll: true,
+      ).firstMatch(cellXml);
       if (inlineMatch != null) {
         return _xmlDecode(inlineMatch.group(1) ?? '').trim();
       }
@@ -384,8 +414,10 @@ class FileImportService {
     }
 
     // 兜底：尝试任何 <t> 标签
-    final inlineMatch =
-        RegExp(r'<t[^>]*>(.*?)</t>', dotAll: true).firstMatch(cellXml);
+    final inlineMatch = RegExp(
+      r'<t[^>]*>(.*?)</t>',
+      dotAll: true,
+    ).firstMatch(cellXml);
     if (inlineMatch != null) {
       return _xmlDecode(inlineMatch.group(1) ?? '').trim();
     }
@@ -403,28 +435,30 @@ class FileImportService {
         .replaceAll('&apos;', "'");
   }
 
-  /// 列字母 → 数字索引
+  /// 列字母 → 数字索引（大小写不敏感，防御性处理小写列字母）
   static int _colLetterToIndex(String letters) {
+    final upper = letters.toUpperCase();
     var result = 0;
-    for (var i = 0; i < letters.length; i++) {
-      result = result * 26 + (letters.codeUnitAt(i) - 'A'.codeUnitAt(0) + 1);
+    for (var i = 0; i < upper.length; i++) {
+      result = result * 26 + (upper.codeUnitAt(i) - 'A'.codeUnitAt(0) + 1);
     }
     return result - 1;
   }
 
-  static List<Question> toDbQuestions(
-      List<QuestionItem> items, String bankId) {
+  static List<Question> toDbQuestions(List<QuestionItem> items, String bankId) {
     final now = DateTime.now();
     return items
-        .map((item) => Question(
-              id: _uuid.v4(),
-              bankId: bankId,
-              rawText: item.question,
-              preprocessedText: TextPreprocessor.preprocess(item.question),
-              answer: item.answer,
-              explanation: item.explanation,
-              createdAt: now,
-            ))
+        .map(
+          (item) => Question(
+            id: _uuid.v4(),
+            bankId: bankId,
+            rawText: item.question,
+            preprocessedText: TextPreprocessor.preprocess(item.question),
+            answer: item.answer,
+            explanation: item.explanation,
+            createdAt: now,
+          ),
+        )
         .toList();
   }
 }

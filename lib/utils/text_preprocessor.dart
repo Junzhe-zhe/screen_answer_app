@@ -37,6 +37,7 @@ class TextPreprocessor {
     '計': '计', '絡': '络', '較': '较', '運': '运',
     '態': '态', '異': '异', '議': '议', '響': '响', '應': '应',
     '郵': '邮', '準': '准', '這': '这', '問': '问',
+    '熱': '热', '屆': '届', '責': '责', '範': '范',
   };
 
   /// 已知的 UI 噪声关键词（来自考试页面元素）
@@ -46,6 +47,8 @@ class TextPreprocessor {
     '倒计时', '交卷', '剩余时间', '答题卡',
     '上一题', '下一题', '提交提交', '返回列表',
     '单选题', '多选题', '判断题', '填空题',
+    // 注意：OCR 题型标签乱码（"2斩题 多造" 等）在 Phase 1 用正则子串移除，
+    // 不能放进这里——_noiseKeywords 是整行过滤，会误删同行题干。
   };
 
   /// 轻量预处理：仅做半角/简体转换和基本清理，不过滤噪声。
@@ -84,6 +87,16 @@ class TextPreprocessor {
     result = result.replaceAll(RegExp(r'\b([A-D])\s*(?=[A-D]\s*[A-D])'), '');
     // 1.6 尾部的孤立选项字母： " D" 或 " A" 在行末
     result = result.replaceAll(RegExp(r'\s+[A-D](?=\s*$)', multiLine: true), '');
+    // 1.7 OCR 题型标签乱码子串："多选题"→"2斩题 多造"、"服漫食丁旨力" 等
+    //     仅移除乱码片段本身，保留题干（不能整行丢弃）
+    result = result.replaceAll(RegExp(r'斩\s*题'), '');
+    result = result.replaceAll(RegExp(r'多造|多逸'), '');
+    result = result.replaceAll(RegExp(r'服漫食丁旨力|漫食丁旨力'), '');
+    // 行首独立"多选/单选/判断"题型标签（OCR 常与题干同行）
+    result = result.replaceAll(RegExp(r'^\s*多\s*选\s*', multiLine: true), '');
+    result = result.replaceAll(RegExp(r'^\s*单\s*选\s*', multiLine: true), '');
+    result = result.replaceAll(RegExp(r'^\s*判\s*断\s*', multiLine: true), '');
+    result = result.replaceAll(RegExp(r'\s+'), ' ');
 
     // === Phase 2: 按行过滤 ===
     final lines = result.split('\n');

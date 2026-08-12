@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
@@ -20,9 +21,10 @@ class RecognitionService {
       const MethodChannel(AppConstants.recognitionChannel);
 
   static MatchEngine? _matchEngine;
-  static QuestionBank? _activeBank;
+  static QuestionBank? _activeBank; // 兼容旧引用：当前命中的题库
+  static List<QuestionBank> _activeBanks = []; // 全部已加载题库（多题库匹配）
   static bool _isInitialized = false;
-  static final _initCompleter = Completer<void>();
+  static Completer<void> _initCompleter = Completer<void>();
 
   /// 初始化并注册原生通道处理器
   static Future<void> initialize() async {
@@ -31,7 +33,16 @@ class RecognitionService {
 
     _channel.setMethodCallHandler(_onMethodCall);
     await _loadDefaultBank();
-    _initCompleter.complete();
+    if (!_initCompleter.isCompleted) _initCompleter.complete();
+  }
+
+  /// 仅用于单元测试：重置全局状态，使下一次 initialize() 重新执行完整初始化。
+  @visibleForTesting
+  static void resetForTest() {
+    _matchEngine = null;
+    _activeBank = null;
+    _isInitialized = false;
+    _initCompleter = Completer<void>();
   }
 
   /// 等待初始化完成（供需要确保引擎准备好的调用方使用）
@@ -56,13 +67,37 @@ class RecognitionService {
 
   static Future<void> _loadDefaultBank() async {
     try {
-      final bank = await DatabaseService.getDefaultBank();
-      if (bank != null) {
-        await _applyBank(bank);
-      } else {
+      // 多题库：加载全部题库的题目，合并构建单个匹配引擎。
+      // 实际使用时用户可能在不同题库间切换做题，全部加载可保证
+      // 悬浮窗在任何题库界面都能命中。
+      final banks = await DatabaseService.getBanks();
+      if (banks.isEmpty) {
         _matchEngine = null;
         _activeBank = null;
+        _activeBanks = [];
+        return;
       }
+      final allPairs = <QuestionPair>[];
+      for (final bank in banks) {
+        final pairs = await DatabaseService.getQuestionPairs(bank.id);
+        for (final p in pairs) {
+          allPairs.add(QuestionPair(
+            question: p.question,
+            answer: p.answer,
+            explanation: p.explanation,
+            type: p.type,
+            bankId: bank.id,
+          ));
+        }
+      }
+      _matchEngine = MatchEngine(allPairs);
+      _activeBanks = banks;
+      _activeBank = banks.firstWhere(
+        (b) => b.isDefault,
+        orElse: () => banks.first,
+      );
+      debugPrint('[RecognitionService] loaded ${banks.length} banks, '
+          '${allPairs.length} questions total (multi-bank matching)');
     } catch (e, stack) {
       debugPrint('[RecognitionService] load bank error: $e');
       unawaited(DiagnosticLogService.write('recognition-load-default-bank', e, stack));
@@ -70,9 +105,8 @@ class RecognitionService {
   }
 
   static Future<void> _applyBank(QuestionBank bank) async {
-    final pairs = await DatabaseService.getQuestionPairs(bank.id);
-    _matchEngine = MatchEngine(pairs);
-    _activeBank = bank;
+    // 兼容旧调用：加载单个题库时也保留其他题库（重新全量加载）
+    await _loadDefaultBank();
   }
 
   static Future<dynamic> _onMethodCall(MethodCall call) async {
@@ -105,7 +139,12 @@ class RecognitionService {
     String ocrType = '',
     int? generation,
   }) async {
-    await ready;
+    // 等待初始化完成，但加超时保护，避免初始化卡住导致原生端识别超时
+    try {
+      await ready.timeout(const Duration(seconds: 3));
+    } catch (_) {
+      debugPrint('[RecognitionService] init wait timeout, continue with current engine');
+    }
 
     if (_matchEngine == null || _activeBank == null) {
       await _sendResult(
@@ -120,6 +159,15 @@ class RecognitionService {
     }
 
     final result = _matchEngine!.matchWithCandidates(ocrText, ocrType: ocrType);
+    final candSummary = result.candidates
+        .map((c) => '[score=${c.score.toStringAsFixed(2)} q=${c.question.length > 40 ? c.question.substring(0, 40) : c.question}]')
+        .join(' | ');
+    debugPrint('[RecognitionService] match: in=[$ocrText] level=${result.level.name} '
+        'answer=[${result.answer}] matched=[${result.matchedQuestion}] '
+        'candidates=${result.candidates.length} $candSummary');
+    unawaited(DiagnosticLogService.write('recognition-match', Exception(
+      'in=[$ocrText] level=${result.level.name} answer=[${result.answer}] '
+      'matched=[${result.matchedQuestion}] candidates=${result.candidates.length} $candSummary')));
 
     try {
       await DatabaseService.saveHistory(RecognitionHistory(
@@ -129,7 +177,7 @@ class RecognitionService {
         matchedAnswer: result.answer,
         confidence: result.confidence,
         matchLevel: result.level.name,
-        bankId: _activeBank!.id,
+        bankId: result.matchedBankId ?? _activeBank!.id,
         timestamp: DateTime.now(),
       ));
     } catch (e) {

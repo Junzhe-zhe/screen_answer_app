@@ -37,6 +37,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   Future<void> _loadMatchEngine(QuestionBank bank) async {
     await RecognitionService.loadBank(bank.id);
+    if (!mounted) return;
     setState(() => _activeBank = bank);
   }
 
@@ -326,7 +327,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             label: '导入',
             onTap: () async {
               await Navigator.push(context, MaterialPageRoute(builder: (_) => const ImportScreen()));
-              _loadDefaultBank();
+              // 导入后仅在当前无题库时才加载默认题库，避免覆盖用户已选择的题库
+              if (_activeBank == null) {
+                _loadDefaultBank();
+              }
             },
           ),
         ],

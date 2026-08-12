@@ -9,4 +9,5 @@ import io.flutter.plugin.common.BinaryMessenger
  */
 object FlutterBridge {
     var messenger: BinaryMessenger? = null
+    @Volatile var service: FloatService? = null
 }

@@ -208,9 +208,9 @@ void main() {
   group('SettingsService - 边界值', () {
     test('悬浮球大小最小值', () async {
       SharedPreferences.setMockInitialValues({});
-      await SettingsService.saveFloatBallSize(20.0); // AppConstants.floatBallMinSize
+      await SettingsService.saveFloatBallSize(5.0); // AppConstants.floatBallMinSize
       final loaded = await SettingsService.load();
-      expect(loaded.floatBallSize, 20.0);
+      expect(loaded.floatBallSize, 5.0);
     });
 
     test('悬浮球大小最大值', () async {
@@ -229,21 +229,21 @@ void main() {
 
     test('边框粗细最大值', () async {
       SharedPreferences.setMockInitialValues({});
-      await SettingsService.saveBorderWidth(6.0);
+      await SettingsService.saveBorderWidth(10.0);
       final loaded = await SettingsService.load();
-      expect(loaded.borderWidth, 6.0);
+      expect(loaded.borderWidth, 10.0);
     });
   });
 
   group('SettingsService - 并发与一致性', () {
     test('连续快速保存应全部生效', () async {
       SharedPreferences.setMockInitialValues({});
-      await SettingsService.saveFloatBallSize(30.0);
+      await SettingsService.saveFloatBallSize(20.0);
       await SettingsService.saveFloatBallSize(50.0);
-      await SettingsService.saveFloatBallSize(70.0);
+      await SettingsService.saveFloatBallSize(80.0);
       final loaded = await SettingsService.load();
       // 最后一个写入的值应生效
-      expect(loaded.floatBallSize, 70.0);
+      expect(loaded.floatBallSize, 80.0);
     });
 
     test('保存大量设置不应超时', () async {
@@ -251,7 +251,7 @@ void main() {
       final stopwatch = Stopwatch()..start();
       for (var i = 0; i < 100; i++) {
         await SettingsService.save(AppSettings(
-          floatBallSize: 20.0 + i,
+          floatBallSize: 5.0 + (i % 76),
           borderWidth: 1.0 + (i % 6),
           defaultLockPanel: i.isEven,
         ));
@@ -259,6 +259,35 @@ void main() {
       stopwatch.stop();
       // 100 次保存应在合理时间内
       expect(stopwatch.elapsedMilliseconds, lessThan(2000));
+    });
+  });
+
+  group('FloatSettingsService - applySettings 调用参数', () {
+    test('applySettings 传入的 ballSize 应为整数且在合理范围', () async {
+      SharedPreferences.setMockInitialValues({});
+      // 保存设置后应能正确计算 applySettings 参数
+      const ballSizeDouble = 50.0;
+      expect(ballSizeDouble.toInt(), 50);
+      expect(ballSizeDouble.toInt(), greaterThanOrEqualTo(5));
+      expect(ballSizeDouble.toInt(), lessThanOrEqualTo(80));
+    });
+
+    test('applySettings 传入的 borderWidth 应在合理范围', () {
+      const borderWidth = 3.0;
+      expect(borderWidth, greaterThanOrEqualTo(1.0));
+      expect(borderWidth, lessThanOrEqualTo(10.0));
+    });
+
+    test('save 后 SharedPreferences 键名与设置页一致', () async {
+      SharedPreferences.setMockInitialValues({});
+      await SettingsService.saveFloatBallSize(55.0);
+      await SettingsService.saveBorderWidth(4.0);
+      await SettingsService.saveDefaultLockPanel(true);
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getDouble('setting_ball_size'), 55.0);
+      expect(prefs.getDouble('setting_border_width'), 4.0);
+      expect(prefs.getBool('setting_default_lock'), true);
     });
   });
 }

@@ -17,6 +17,7 @@ class _ImportScreenState extends State<ImportScreen> {
   String? _bankName;
 
   Future<void> _pickFile() async {
+    if (!mounted) return;
     setState(() {
       _error = null;
       _importedCount = null;
@@ -41,16 +42,19 @@ class _ImportScreenState extends State<ImportScreen> {
       final fileName = file.name;
 
       if (bytes == null) {
+        if (!mounted) return;
         setState(() => _error = '无法读取文件内容');
         return;
       }
 
+      if (!mounted) return;
       setState(() => _importing = true);
 
       // 解析文件
       final parseResult = await FileImportService.importFile(bytes, fileName);
 
       if (parseResult.error != null) {
+        if (!mounted) return;
         setState(() {
           _error = parseResult.error;
           _importing = false;
@@ -59,6 +63,7 @@ class _ImportScreenState extends State<ImportScreen> {
       }
 
       if (parseResult.questions.isEmpty) {
+        if (!mounted) return;
         setState(() {
           _error = '文件中没有找到有效的题目数据';
           _importing = false;
@@ -83,12 +88,14 @@ class _ImportScreenState extends State<ImportScreen> {
         await DatabaseService.setDefaultBank(bank.id);
       }
 
+      if (!mounted) return;
       setState(() {
         _importedCount = questions.length;
         _bankName = bankName;
         _importing = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = '导入失败: $e';
         _importing = false;

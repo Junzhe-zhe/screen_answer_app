@@ -27,6 +27,8 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import io.flutter.plugin.common.MethodChannel
 import java.nio.ByteBuffer
+import com.screenanswer.screen_answer_app.MainActivity
+import io.flutter.embedding.engine.FlutterEngineCache
 
 class FloatService : Service() {
     companion object {
@@ -86,6 +88,7 @@ class FloatService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        FlutterBridge.service = this
         previousUncaughtHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             diag("uncaught", "thread=${thread.name} generation=$activeRecognitionGeneration inFlight=$recognitionInFlight", error)
@@ -98,13 +101,25 @@ class FloatService : Service() {
         screenW = dm.widthPixels; screenH = dm.heightPixels
         selW = screenW - 40; selH = 600
         selX = 20; selY = (screenH * 0.15).toInt()
+        loadPersistedSettings()
         createChannel(); startFg(); createBall()
         diag("service-create", "screen=${screenW}x${screenH} overlay created")
         setupRecognitionChannel()
     }
 
     private fun setupRecognitionChannel() {
-        val m = FlutterBridge.messenger
+        // 优先使用 MainActivity 缓存的 messenger；Activity 销毁后
+        // FlutterBridge.messenger 可能仍持有有效引用，否则从引擎缓存兜底。
+        val m = FlutterBridge.messenger ?: run {
+            try {
+                FlutterEngineCache.getInstance()
+                    .get(MainActivity.ENGINE_ID)
+                    ?.dartExecutor?.binaryMessenger
+            } catch (e: Exception) {
+                Log.w(TAG, "recognitionChannel: engine cache lookup failed", e)
+                null
+            }
+        }
         if (m != null) {
             recognitionChannel = MethodChannel(m, "com.screenanswer/recognition")
             recognitionChannel?.setMethodCallHandler { call, result ->
@@ -189,6 +204,7 @@ class FloatService : Service() {
 
     override fun onDestroy() {
         diag("service-destroy", "generation=$activeRecognitionGeneration inFlight=$recognitionInFlight captureSetup=$captureSetupDone")
+        FlutterBridge.service = null
         super.onDestroy()
         stopMonitoring()
         recognitionChannel = null
@@ -220,17 +236,17 @@ class FloatService : Service() {
 
     // ====== Floating ball ======
 
-    private fun createBall() {
-        val sz = (50 * resources.displayMetrics.density).toInt()
+    private fun createBall(startX: Int = 50, startY: Int = 500) {
+        val sz = (ballSizeDp * resources.displayMetrics.density).toInt()
         val typ = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else WindowManager.LayoutParams.TYPE_PHONE
         ballParams = WindowManager.LayoutParams(sz, sz, typ,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = 50; y = 500 }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = startX; y = startY }
 
         ball = View(this).apply {
             background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL; setStroke(2, 0xFFFFFFFF.toInt()); setColor(0x00000000)
+                shape = GradientDrawable.OVAL; setStroke(borderWidthDp.toInt(), 0xFFFFFFFF.toInt()); setColor(0x00000000)
             }
             setOnTouchListener(object : View.OnTouchListener {
                 var ix = 0f; var iy = 0f; var px = 0; var py = 0; var mv = false
@@ -284,7 +300,7 @@ class FloatService : Service() {
         val titleH = (48 * density).toInt()
         val resizeSz = (44 * density).toInt()
 
-        // 横向滑动检测：在面板任意位置左右滑动即重新识别。
+        // 横向滑动检测：存在候选列表时左右滑动切换候选；无候选时左右滑动重新识别。
         // 在容器 dispatchTouchEvent 中手动跟踪 down/up 位移，始终 return super 不阻断子 View 交互。
         var swipeDownX = 0f; var swipeDownY = 0f; var swipeDownTime = 0L
 
@@ -295,7 +311,8 @@ class FloatService : Service() {
                         swipeDownX = ev.x; swipeDownY = ev.y; swipeDownTime = System.currentTimeMillis()
                     }
                     MotionEvent.ACTION_UP -> {
-                        val dx = Math.abs(ev.x - swipeDownX)
+                        val rawDx = ev.x - swipeDownX
+                        val dx = Math.abs(rawDx)
                         val dy = Math.abs(ev.y - swipeDownY)
                         val dt = System.currentTimeMillis() - swipeDownTime
                         // 起点位于标题栏或底栏区域时不触发，避免与拖拽/按钮/缩放冲突
@@ -303,7 +320,18 @@ class FloatService : Service() {
                         val inBottom = ansParams != null && swipeDownY > (ansParams!!.height - resizeSz)
                         if (!inTitle && !inBottom && dx > dy * 1.2f && dx > 30 * density && dt < 1200) {
                             handler.post {
-                                performRecognition(autoRecognize = true)
+                                if (candidates.isNotEmpty()) {
+                                    // 候选切换：左滑（rawDx<0）下一个，右滑（rawDx>0）上一个
+                                    val dir = if (rawDx < 0) 1 else -1
+                                    val newIdx = candidateIndex + dir
+                                    if (newIdx in 0 until candidates.size) {
+                                        candidateIndex = newIdx
+                                        ansContent = formatResult("", "", "", "none", candidates, candidateIndex, fromCandidate = true)
+                                        refreshAnswerPanel()
+                                    }
+                                } else {
+                                    performRecognition(autoRecognize = true)
+                                }
                             }
                         }
                     }
@@ -487,7 +515,7 @@ class FloatService : Service() {
         val container = FrameLayout(this@FloatService).apply {
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE; setColor(0x33888888.toInt())
-                setStroke(3, 0xFF888888.toInt()); cornerRadius = 12f
+                setStroke(borderWidthDp.toInt(), 0xFF888888.toInt()); cornerRadius = 12f
             }
             // 注意：选框浮层不再显示任何文字，避免被截图 OCR 误识别（提示改为 Toast）
 
@@ -564,6 +592,26 @@ class FloatService : Service() {
     private var lastSetupError: String? = null
     private var pendingFrameHash: Long = 0
     private var stableFrameCount = 0
+
+    // 可配置参数（通过 Flutter 设置页同步）
+    private var ballSizeDp: Int = 50       // 悬浮球直径（dp）
+    private var borderWidthDp: Float = 3f  // 选区边框粗细（dp）
+    private var defaultLockPanel: Boolean = false
+
+    /// 从 FlutterSharedPreferences 读取已保存的设置，服务重启后保持用户配置
+    private fun loadPersistedSettings() {
+        try {
+            val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+            val ball = prefs.getFloat("flutter.setting_ball_size", -1f)
+            if (ball > 0f) ballSizeDp = ball.toInt().coerceIn(5, 80)
+            val border = prefs.getFloat("flutter.setting_border_width", -1f)
+            if (border > 0f) borderWidthDp = border.coerceIn(1f, 10f)
+            defaultLockPanel = prefs.getBoolean("flutter.setting_default_lock", false)
+            diag("load-settings", "ball=$ballSizeDp border=$borderWidthDp lock=$defaultLockPanel")
+        } catch (e: Exception) {
+            diag("load-settings", "failed, use defaults", e)
+        }
+    }
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -701,7 +749,7 @@ class FloatService : Service() {
                 if (autoRecognize) startMonitoring()
             }
         }
-        handler.postDelayed(recognitionTimeout!!, 10000)
+        handler.postDelayed(recognitionTimeout!!, 6000)
 
         val dm = DisplayMetrics()
         wm?.defaultDisplay?.getRealMetrics(dm)
@@ -800,10 +848,10 @@ class FloatService : Service() {
         val ex = ((selX + selW) * w / screenW).coerceIn(0, w - 1)
         val ey = ((selY + selH) * h / screenH).coerceIn(0, h - 1)
         var hash = 0L
-        for (i in 0..4) {
-            for (j in 0..4) {
-                val x = sx + (ex - sx) * i / 4
-                val y = sy + (ey - sy) * j / 4
+        for (i in 0..2) {
+            for (j in 0..2) {
+                val x = sx + (ex - sx) * i / 2
+                val y = sy + (ey - sy) * j / 2
                 val offset = y * rowStride + x * pixelStride
                 if (offset + 2 < buffer.capacity()) {
                     hash = hash * 31 + (buffer.get(offset).toInt() and 0xFF)
@@ -876,6 +924,23 @@ class FloatService : Service() {
             Regex("""^\s*第\s*\d+\s*[/\/]\s*\d+\s*题?"""),
             Regex("""^\s*第\s*\d+\s*页"""),
             Regex("""^\s*\d+\s*%"""),
+            // 新增：考试小程序 UI 噪声
+            Regex("""^\s*\d+\s*[/\/⼀]\s*\d+\s*$"""),   // "4/100" 进度
+            Regex("""^\s*\d{1,2}\s*[:：]\s*\d{2}\s*$"""), // "00:00" 倒计时（独立行）
+            Regex("""^\s*备注栏\s*.*$"""),               // 答案面板溢出
+            Regex("""^\s*选项\b"""),                     // "选项A/B/C/D" 前缀
+            Regex("""^\s*单\s*项\s*选\s*择\s*题\s*$"""), // 变体标签
+            Regex("""^\s*多\s*项\s*选\s*择\s*题\s*$"""), // 变体标签
+            Regex("""^\s*判\s*断\s*题\s*$"""),           // 变体标签
+            Regex("""(多项选择题|单项选择题)"""),         // 不加空格的标签
+            Regex("""^\s*第\s*\d+\s*题\s*$"""),          // "第4题"
+            // OCR 题型标签乱码变体："多选题"→"2斩题 多造"、"多选题"→"多逸" 等
+            Regex("""斩\s*题"""),                            // "斩题"（"多选题"→"2斩题/&斩题" 乱码，无条件删除）
+            Regex("""多造"""),                              // "多选" 误识别
+            Regex("""多逸"""),                              // "多选" 误识别（变体）
+            Regex("""^\s*多\s*选\s*"""),                 // 行首独立"多选"题型标签
+            Regex("""^服漫食丁旨力"""),                    // 特定考试App UI 乱码
+            Regex("""^漫食丁旨力"""),                      // 乱码变体（少1字）
         )
 
         // 选项行锚点：A./B、/C．/(D) 等
@@ -942,7 +1007,8 @@ class FloatService : Service() {
 
         // 页面题型标签优先，兼容 OCR 只识别出“单选/多选/判断”的情况。
         if (normalized.contains("多选") || normalized.contains("可多选") ||
-            normalized.contains("多项选择") || normalized.contains("多项选择题")) {
+            normalized.contains("多项选择") || normalized.contains("多项选择题") ||
+            normalized.contains("多造") || normalized.contains("多逸")) {
             return "multi"
         }
         if (normalized.contains("单选") || normalized.contains("单项选择") ||
@@ -996,10 +1062,12 @@ class FloatService : Service() {
                     val ocrType = detectQuestionType(rawText)
                     // 提取题目正文（仅题干，去掉 UI 噪声和选项内容）
                     val questionText = extractQuestionText(rawText)
+                    diag("ocr-text", "raw=[$rawText] type=$ocrType")
+                    diag("ocr-extracted", "question=[$questionText]")
                     // 提取后文本太短不进行匹配，避免"乱码"误匹配
                     val chineseChars = questionText.count { it in '\u4e00'..'\u9fff' }
                     if (questionText.isBlank() || chineseChars < 3) {
-                        updateAnswer("未检测到有效题目\n\n" + rawText.take(100))
+                        updateAnswer("未检测到有效题目，请调整题区并重试")
                         finishRecognition(generation, autoRecognize)
                     } else {
                         matchAndShow(questionText, ocrType, generation)
@@ -1023,6 +1091,7 @@ class FloatService : Service() {
         autoRecognize: Boolean = false
     ) {
         if (generation != activeRecognitionGeneration) return
+        diag("match-send", "text=[$ocrText] type=$ocrType gen=$generation")
         val args = mapOf("text" to ocrText, "type" to ocrType, "generation" to generation)
         // 通道为空时先尝试重建，再取值
         val ch = recognitionChannel ?: run {
@@ -1043,7 +1112,7 @@ class FloatService : Service() {
                 recognitionTimeout?.let { handler.removeCallbacks(it) }
                 recognitionTimeout = Runnable {
                     if (generation == activeRecognitionGeneration && recognitionInFlight) {
-                        ansContent = "识别结果（匹配超时）\n\n$ocrText"
+                        ansContent = "识别超时，请重试或调整题区"
                         refreshAnswerPanel()
                         finishRecognition(generation, autoRecognize = true)
                     }
@@ -1117,12 +1186,61 @@ class FloatService : Service() {
         return text.uppercase()
             .replace(Regex("\\s+"), "")
             .replace(Regex("[，。！？、；：,.!?;:()（）\\[\\]【】]"), "")
+            // 移除应用面板字符串，避免面板显示内容影响签名对比
+            .replace(Regex("匹配中[.…]*|识别中[.…]*|识别超时.*|正确答案[:：]?.*|你的答案[:：]?.*"), "")
             .trim()
     }
 
     private fun updateAnswer(text: String) {
         ansContent = text
         handler.post { showAnswer() }
+    }
+
+    /// 从 Flutter 设置页同步参数，运行时立即生效
+    fun applySettings(ballSize: Int, borderWidth: Float, defaultLock: Boolean) {
+        val needRecreateBall = ballSize != ballSizeDp
+        val needRedraw = borderWidth.toInt() != borderWidthDp.toInt()
+        ballSizeDp = ballSize.coerceIn(5, 80)
+        borderWidthDp = borderWidth.coerceIn(1f, 10f)
+        defaultLockPanel = defaultLock
+        if (needRecreateBall) handler.post { recreateBall() }
+        if (needRedraw) handler.post { redrawBall(); redrawSelection() }
+        diag("apply-settings", "ball=$ballSizeDp border=$borderWidthDp lock=$defaultLockPanel recreate=$needRecreateBall redraw=$needRedraw")
+    }
+
+    /// 销毁旧悬浮球并按新尺寸重建，保留当前位置
+    private fun recreateBall() {
+        val oldX = ballParams?.x ?: 50
+        val oldY = ballParams?.y ?: 500
+        try {
+            ball?.let { wm?.removeView(it) }
+        } catch (e: Exception) {
+            diag("recreate-ball", "remove failed", e)
+        }
+        ball = null
+        ballParams = null
+        createBall(oldX, oldY)
+        diag("recreate-ball", "done sizeDp=$ballSizeDp pos=($oldX,$oldY)")
+    }
+
+    /// 重绘悬浮球边框
+    private fun redrawBall() {
+        val v = ball ?: return
+        val bg = v.background as? GradientDrawable ?: return
+        bg.setStroke(borderWidthDp.toInt(), 0xFFFFFFFF.toInt())
+        bg.invalidateSelf()
+        v.invalidate()
+        diag("redraw-ball", "stroke=${borderWidthDp.toInt()}")
+    }
+
+    /// 重绘选区边框
+    private fun redrawSelection() {
+        val v = selView ?: return
+        val bg = v.background as? GradientDrawable ?: return
+        bg.setStroke(borderWidthDp.toInt(), 0xFF888888.toInt())
+        bg.invalidateSelf()
+        v.invalidate()
+        diag("redraw-selection", "stroke=${borderWidthDp.toInt()}")
     }
 
     data class Candidate(val question: String, val answer: String, val explanation: String, val score: Double)

@@ -34,4 +34,15 @@ object DiagnosticLogger {
             Log.e(TAG, "write diagnostic log failed", writeError)
         }
     }
+
+    /// 读取 diagnostic-native.log 内容，供 Flutter 设置页展示
+    fun readLog(context: Context?): String {
+        return try {
+            val file = context?.getFileStreamPath("diagnostic-native.log") ?: return ""
+            if (file.exists()) file.readText() else ""
+        } catch (e: Exception) {
+            Log.e(TAG, "read diagnostic log failed", e)
+            ""
+        }
+    }
 }

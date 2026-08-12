@@ -7,6 +7,7 @@ class MatchResult {
   final MatchLevel level;
   final String? explanation;
   final List<CandidateItem> candidates;
+  final String? matchedBankId; // 命中的题库（多题库场景）
 
   const MatchResult({
     required this.answer,
@@ -15,6 +16,7 @@ class MatchResult {
     required this.level,
     this.explanation,
     this.candidates = const [],
+    this.matchedBankId,
   });
 
   factory MatchResult.empty() => const MatchResult(

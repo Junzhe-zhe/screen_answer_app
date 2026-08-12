@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/diagnostic_log_service.dart';
+import '../services/float_settings_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -20,6 +23,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _defaultLock = false;
   bool _isLoaded = false;
 
+  /// Slider 拖动防抖：拖动停止 [debounceDelay] 后才真正写盘并推送原生端。
+  /// 避免每次刻度变化都触发 SharedPreferences 写入导致 UI 卡顿。
+  static const debounceDelay = Duration(milliseconds: 300);
+  Timer? _debounceTimer;
+
   @override
   void initState() {
     super.initState();
@@ -28,6 +36,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     setState(() {
       _ballSize = prefs.getDouble(_keyBallSize) ?? 40.0;
       _borderWidth = prefs.getDouble(_keyBorderWidth) ?? 2.0;
@@ -43,16 +52,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await prefs.setDouble(key, value);
   }
 
-  Future<void> _saveBallSize(double value) =>
-      _saveDouble(_keyBallSize, value, (v) => _ballSize = v);
+  Future<void> _saveBallSize(double value) async {
+    await _saveDouble(_keyBallSize, value, (v) => _ballSize = v);
+    _scheduleApplyToNative();
+  }
 
-  Future<void> _saveBorderWidth(double value) =>
-      _saveDouble(_keyBorderWidth, value, (v) => _borderWidth = v);
+  Future<void> _saveBorderWidth(double value) async {
+    await _saveDouble(_keyBorderWidth, value, (v) => _borderWidth = v);
+    _scheduleApplyToNative();
+  }
 
   Future<void> _saveDefaultLock(bool value) async {
     setState(() => _defaultLock = value);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyDefaultLock, value);
+    _scheduleApplyToNative();
+  }
+
+  /// 防抖推送原生端：拖动过程中多次触发只保留最后一次。
+  void _scheduleApplyToNative() {
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(debounceDelay, _applyToNative);
+  }
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 将当前设置参数推送到原生 FloatService，运行时立即生效。
+  void _applyToNative() {
+    FloatSettingsService.applySettings(
+      ballSize: _ballSize.toInt(),
+      borderWidth: _borderWidth,
+      defaultLock: _defaultLock,
+    );
   }
 
   Future<void> _showDiagnosticLog() async {
@@ -99,9 +134,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               width: 200,
               child: Slider(
                 value: _ballSize,
-                min: 20,
+                min: 5,
                 max: 80,
-                divisions: 60,
+                divisions: 75,
                 label: '${_ballSize.toInt()} dp',
                 onChanged: _saveBallSize,
               ),
@@ -115,8 +150,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Slider(
                 value: _borderWidth,
                 min: 1,
-                max: 6,
-                divisions: 5,
+                max: 10,
+                divisions: 9,
                 label: '${_borderWidth.toInt()} dp',
                 onChanged: _saveBorderWidth,
               ),

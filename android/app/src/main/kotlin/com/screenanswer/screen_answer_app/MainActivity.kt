@@ -7,9 +7,12 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import android.content.Context
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.MethodChannel
+import com.screenanswer.service.DiagnosticLogger
 import com.screenanswer.service.FloatService
 import com.screenanswer.service.FlutterBridge
 
@@ -17,10 +20,26 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val TAG = "MainAct"
         private const val REQ_PROJ = 1001
+
+        /// Flutter 引擎缓存 ID：引擎独立于 Activity 生命周期存活，
+        /// 保证 FloatService（前台服务）在 Activity 销毁后仍能与匹配引擎通信。
+        const val ENGINE_ID = "screen_answer_engine"
     }
 
     private var pendingResultCode = 0
     private var pendingData: Intent? = null
+
+    override fun provideFlutterEngine(context: Context): FlutterEngine? {
+        // 复用缓存的引擎：Activity 重建（返回键退出后再进入）时
+        // 不重新创建引擎，避免 Dart 端 RecognitionService 重复初始化。
+        val cached = FlutterEngineCache.getInstance().get(ENGINE_ID)
+        if (cached != null) return cached
+        val engine = FlutterEngine(context)
+        FlutterEngineCache.getInstance().put(ENGINE_ID, engine)
+        return engine
+    }
+
+    override fun shouldDestroyEngineWithHost(): Boolean = false
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -42,6 +61,14 @@ class MainActivity : FlutterActivity() {
                 } else if (call.method == "hideBall") {
                     stopFloatService()
                     result.success(true)
+                } else if (call.method == "applySettings") {
+                    val ballSize = call.argument<Int>("ballSize") ?: 50
+                    val borderWidth = (call.argument<Double>("borderWidth") ?: 3.0).toFloat()
+                    val defaultLock = call.argument<Boolean>("defaultLock") ?: false
+                    FlutterBridge.service?.applySettings(ballSize, borderWidth, defaultLock)
+                    result.success(true)
+                } else if (call.method == "readNativeLog") {
+                    result.success(DiagnosticLogger.readLog(this))
                 } else result.notImplemented()
             }
 

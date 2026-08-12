@@ -4,12 +4,32 @@ import '../utils/text_preprocessor.dart';
 
 class MatchEngine {
   final List<QuestionPair> _pairs;
-  final Map<String, QuestionPair> _exactMap;
+  /// 与 [_pairs] 平行的预计算预处理文本，避免每次匹配重复预处理全部题目。
+  final List<String> _preprocessedQuestions;
 
-  MatchEngine(this._pairs)
-      : _exactMap = {
-          for (final p in _pairs) TextPreprocessor.preprocess(p.question): p
-        };
+  /// 构造时对重复题目去重：相同【原始题目文本】只保留最后插入者。
+  ///
+  /// 注意：去重键必须用原始文本而非预处理文本——预处理是强过滤管线，
+  /// 两道不同的题（如仅数字/选项不同）预处理后可能相同，按预处理去重会误删题目。
+  /// 只有完全相同的题目（重复导入/重复录入）才去重，保证
+  /// L1 精确匹配 / L1.5 包含匹配 / L2 模糊匹配对重复题目的行为一致。
+  factory MatchEngine(List<QuestionPair> pairs) {
+    final seen = <String>{};
+    final deduped = <QuestionPair>[];
+    final preprocessed = <String>[];
+    for (final p in pairs.reversed) {
+      if (seen.add(p.question)) {
+        deduped.add(p);
+        preprocessed.add(TextPreprocessor.preprocess(p.question));
+      }
+    }
+    return MatchEngine._(
+      deduped.reversed.toList(),
+      preprocessed.reversed.toList(),
+    );
+  }
+
+  MatchEngine._(this._pairs, this._preprocessedQuestions);
 
   /// 三级匹配流水线
   MatchResult match(String ocrText, {String ocrType = ''}) {
@@ -39,28 +59,32 @@ class MatchEngine {
         _fuzzyWithCandidates(_scorePairs(preprocessed, ocrType: ocrType));
   }
 
-  /// L1: 精确匹配 (O(1)) + L1.5: 包含匹配，未命中返回 null
+  /// L1: 精确匹配（遍历已去重的题目列表）+ L1.5: 包含匹配，未命中返回 null
   MatchResult? _exactAndContainMatch(String preprocessed,
       {String ocrType = ''}) {
-    // L1: 精确匹配。按题型从原始题目列表筛选，避免 exactMap 中的同题覆盖或错题型命中。
-    for (final pair in _pairs.reversed) {
+    // L1: 精确匹配。按题型从原始题目列表筛选；倒序遍历使重复题目取最后插入者。
+    for (var i = _pairs.length - 1; i >= 0; i--) {
+      final pair = _pairs[i];
       if (!_isTypeCompatible(pair, ocrType, allowUnknownOcrType: true)) continue;
-      if (TextPreprocessor.preprocess(pair.question) != preprocessed) continue;
+      if (_preprocessedQuestions[i] != preprocessed) continue;
       return MatchResult(
         answer: pair.answer,
         matchedQuestion: pair.question,
         confidence: 1.0,
         level: MatchLevel.exact,
         explanation: pair.explanation,
+        matchedBankId: pair.bankId,
       );
     }
 
     // L1.5: 包含匹配 - OCR 文本包含整道题目（OCR 常带题号、选项等噪声）
+    // 与 L1 保持一致：倒序遍历 _pairs，重复题目时最后插入者优先。
     var bestContainScore = 0.0;
     QuestionPair? bestContainPair;
-    for (final entry in _exactMap.entries) {
-      final bankQ = entry.key;
-      final pair = entry.value;
+    for (var i = _pairs.length - 1; i >= 0; i--) {
+      final pair = _pairs[i];
+      final bankQ = _preprocessedQuestions[i];
+      if (bankQ.isEmpty) continue;
       if (!_isTypeCompatible(pair, ocrType, allowUnknownOcrType: true)) continue;
       if (bankQ.length < 8) continue; // 太短的题目跳过包含匹配
       if (preprocessed.contains(bankQ)) {
@@ -71,6 +95,7 @@ class MatchEngine {
           confidence: 0.98,
           level: MatchLevel.exact,
           explanation: pair.explanation,
+          matchedBankId: pair.bankId,
         );
       }
       // 题目包含 OCR 核心内容（OCR 只截到了部分题目）
@@ -101,6 +126,7 @@ class MatchEngine {
         confidence: bestContainScore,
         level: MatchLevel.exact,
         explanation: bestContainPair.explanation,
+        matchedBankId: bestContainPair.bankId,
       );
     }
     return null;
@@ -112,7 +138,8 @@ class MatchEngine {
     QuestionPair? bestPair;
     final scored = <_ScoredPair>[];
 
-    for (final pair in _pairs) {
+    for (var i = 0; i < _pairs.length; i++) {
+      final pair = _pairs[i];
       if (!_isTypeCompatible(
         pair,
         ocrType,
@@ -120,7 +147,8 @@ class MatchEngine {
       )) {
         continue;
       }
-      final target = TextPreprocessor.preprocess(pair.question);
+      // 复用构造时预计算的预处理文本，避免每次匹配重新预处理全部题目
+      final target = _preprocessedQuestions[i];
       final score = _partialRatio(preprocessed, target);
       if (score > bestScore) {
         bestScore = score;
@@ -137,13 +165,16 @@ class MatchEngine {
   /// 模糊评分 -> 普通匹配结果（无候选列表）
   MatchResult _fuzzyResult(_FuzzyOutcome outcome) {
     final bestPair = outcome.bestPair;
-    if (bestPair != null && outcome.bestScore >= 0.7) {
+    // 阈值 0.55：OCR 常含乱码/错字导致相似度偏低，0.7 过于严格会漏匹配；
+    // 候选列表机制（Top-3 + 分数展示）仍能防止低分误匹配。
+    if (bestPair != null && outcome.bestScore >= 0.55) {
       return MatchResult(
         answer: bestPair.answer,
         matchedQuestion: bestPair.question,
         confidence: outcome.bestScore,
         level: MatchLevel.fuzzy,
         explanation: bestPair.explanation,
+        matchedBankId: bestPair.bankId,
       );
     }
     return MatchResult.empty();
@@ -152,13 +183,15 @@ class MatchEngine {
   /// 模糊评分 -> 带候选列表的匹配结果
   MatchResult _fuzzyWithCandidates(_FuzzyOutcome outcome) {
     final bestPair = outcome.bestPair;
-    if (bestPair != null && outcome.bestScore >= 0.7) {
+    // 阈值 0.55：与 match() 保持一致
+    if (bestPair != null && outcome.bestScore >= 0.55) {
       return MatchResult(
         answer: bestPair.answer,
         matchedQuestion: bestPair.question,
         confidence: outcome.bestScore,
         level: MatchLevel.fuzzy,
         explanation: bestPair.explanation,
+        matchedBankId: bestPair.bankId,
       );
     }
 
@@ -224,14 +257,8 @@ class MatchEngine {
     final short = a.length < b.length ? a : b;
     final long = a.length < b.length ? b : a;
 
-    // 如果短文本长度 <= 5，用 Levenshtein distance ratio
-    if (short.length <= 5) {
-      final d = _levenshtein(
-          short, long.substring(0, min(short.length, long.length)));
-      final maxLen = max(short.length, long.length);
-      return maxLen == 0 ? 0.0 : 1.0 - (d / maxLen);
-    }
-
+    // 短文本同样做滑动窗口匹配：仅与长文本开头比较会漏掉
+    // 匹配内容位于长文本中间的情况（评分严重偏低导致匹配失败）。
     double bestScore = 0.0;
     for (var i = 0; i <= long.length - short.length; i++) {
       final window = long.substring(i, i + short.length);
@@ -274,12 +301,14 @@ class QuestionPair {
   final String answer;
   final String? explanation;
   final String type; // 'single' | 'multi' | 'judge' | ''
+  final String? bankId; // 所属题库（多题库合并匹配时区分来源）
 
   QuestionPair({
     required this.question,
     required this.answer,
     this.explanation,
     String? type,
+    this.bankId,
   }) : type = type ?? QuestionPair.inferType(answer);
 
   /// 从答案推断题型，兼容导入题库中的"字母 + 选项内容"格式。
@@ -287,26 +316,40 @@ class QuestionPair {
     final value = answer.trim().toUpperCase();
     if (value.isEmpty) return '';
 
-    final judgeText = value.replaceAll(RegExp(r'[\s.、．:：()（）]'), '');
-    final judgeWords = RegExp(r'(正确|错误|对|错|是|否|TRUE|FALSE)')
-        .allMatches(judgeText)
-        .length;
-    if (RegExp(r'^(正确|错误|对|错|是|否|TRUE|FALSE|T|F)$').hasMatch(judgeText) ||
-        judgeWords >= 2 ||
-        (RegExp(r'^[A-H](正确|错误|对|错|是|否)$').hasMatch(judgeText))) {
+    // 判断题判定（先于选项标记检测）：字母前缀 + 纯判断词（如 "A.正确"、"B、错误"）
+    // 此时字母只是题干编号，选项内容本身就是判断词 → 判断题。
+    final compactAll = value.replaceAll(RegExp(r'[\s.、．:：()（）/]'), '');
+    if (RegExp(r'^[A-H](正确|错误|对|错|是|否)$').hasMatch(compactAll)) {
       return 'judge';
     }
 
+    // 选项字母标记（A. / B、 / C． 等）——先检测，避免选项内容中的
+    // "正确/错误"等词（如"D. 正确使用工器具"）误判为判断题。
     final markers = RegExp(r'(?<![A-Z])[A-H](?=\s*[.、．:：)]|$)')
         .allMatches(value)
         .map((m) => m.group(0)!.trim())
         .where((m) => m.isNotEmpty)
         .toSet();
-    if (markers.length >= 2) return 'multi';
-    if (markers.length == 1 &&
-        RegExp(r'^\s*[A-H]\s*(?:[.、．:：)].*)?$', caseSensitive: false)
-            .hasMatch(value)) {
-      return 'single';
+
+    // 带选项字母标记的答案：按单选/多选处理（选项内容中的"正确/错误"不参与判断）
+    if (markers.isNotEmpty) {
+      if (markers.length >= 2) return 'multi';
+      // 单标记且整体以 "A. xxx" / "A、xxx" / "A: xxx" 形式开头 → 单选
+      if (RegExp(r'^\s*[A-H]\s*[.、．:：]').hasMatch(value)) return 'single';
+    }
+
+    // 判断题判定：仅在无选项字母标记时，检查是否纯判断词。
+    // 支持："正确"、"错误"、"对"、"错"、"是"、"否"、"TRUE"、"FALSE"、"T"、"F"、
+    //      "A.正确"（字母+判断词无空格）、"正确 错误"、"对/错" 等组合。
+    final compact = value.replaceAll(RegExp(r'[\s.、．:：()（）/]'), '');
+    if (RegExp(r'^[A-H]?(正确|错误|对|错|是|否|TRUE|FALSE|T|F)$').hasMatch(compact)) {
+      return 'judge';
+    }
+    // 多判断词组合："正确错误"、"对错"、"正确 错误 正确"（compact 后无分隔）
+    if (RegExp(
+      r'^(正确|错误|对|错|是|否|TRUE|FALSE|T|F){2,}$',
+    ).hasMatch(compact)) {
+      return 'judge';
     }
 
     if (RegExp(r'^[A-H]{2,}$').hasMatch(value.replaceAll(RegExp(r'[\s,，、;；/]'), ''))) {
