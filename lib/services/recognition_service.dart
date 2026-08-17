@@ -22,7 +22,6 @@ class RecognitionService {
 
   static MatchEngine? _matchEngine;
   static QuestionBank? _activeBank; // 兼容旧引用：当前命中的题库
-  static List<QuestionBank> _activeBanks = []; // 全部已加载题库（多题库匹配）
   static bool _isInitialized = false;
   static Completer<void> _initCompleter = Completer<void>();
 
@@ -74,7 +73,6 @@ class RecognitionService {
       if (banks.isEmpty) {
         _matchEngine = null;
         _activeBank = null;
-        _activeBanks = [];
         return;
       }
       final allPairs = <QuestionPair>[];
@@ -91,7 +89,6 @@ class RecognitionService {
         }
       }
       _matchEngine = MatchEngine(allPairs);
-      _activeBanks = banks;
       _activeBank = banks.firstWhere(
         (b) => b.isDefault,
         orElse: () => banks.first,
@@ -169,20 +166,25 @@ class RecognitionService {
       'in=[$ocrText] level=${result.level.name} answer=[${result.answer}] '
       'matched=[${result.matchedQuestion}] candidates=${result.candidates.length} $candSummary')));
 
-    try {
-      await DatabaseService.saveHistory(RecognitionHistory(
-        id: _uuid.v4(),
-        ocrText: ocrText,
-        matchedQuestion: result.matchedQuestion,
-        matchedAnswer: result.answer,
-        confidence: result.confidence,
-        matchLevel: result.level.name,
-        bankId: result.matchedBankId ?? _activeBank!.id,
-        timestamp: DateTime.now(),
-      ));
-    } catch (e) {
-      debugPrint('[RecognitionService] saveHistory error: $e');
-    }
+    // 历史记录异步写入，不阻塞识别结果回传（长会话上百次识别时保证响应速度）
+    unawaited(() async {
+      try {
+        await DatabaseService.saveHistory(RecognitionHistory(
+          id: _uuid.v4(),
+          ocrText: ocrText,
+          matchedQuestion: result.matchedQuestion,
+          matchedAnswer: result.answer,
+          confidence: result.confidence,
+          matchLevel: result.level.name,
+          bankId: result.matchedBankId ?? _activeBank!.id,
+          timestamp: DateTime.now(),
+        ));
+        // 控制历史记录总量，避免长时间使用后数据库无限膨胀
+        await DatabaseService.trimHistory(500);
+      } catch (e) {
+        debugPrint('[RecognitionService] saveHistory error: $e');
+      }
+    }());
 
     await _sendResult(
       text: result.matchedQuestion.isNotEmpty ? result.matchedQuestion : ocrText,

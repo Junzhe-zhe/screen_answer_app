@@ -241,4 +241,21 @@ class DatabaseService {
     final db = await database;
     await db.insert('recognition_history', history.toMap());
   }
+
+  /// 清理历史记录，仅保留最近 [keep] 条（防止长期使用后数据库膨胀）
+  static Future<void> trimHistory(int keep) async {
+    try {
+      final db = await database;
+      await db.execute('''
+        DELETE FROM recognition_history
+        WHERE id NOT IN (
+          SELECT id FROM recognition_history
+          ORDER BY timestamp DESC
+          LIMIT ?
+        )
+      ''', [keep]);
+    } catch (e) {
+      debugPrint('[DatabaseService] trimHistory error: $e');
+    }
+  }
 }

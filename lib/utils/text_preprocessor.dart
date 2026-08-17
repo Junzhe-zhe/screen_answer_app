@@ -38,6 +38,17 @@ class TextPreprocessor {
     '態': '态', '異': '异', '議': '议', '響': '响', '應': '应',
     '郵': '邮', '準': '准', '這': '这', '問': '问',
     '熱': '热', '屆': '届', '責': '责', '範': '范',
+    // OCR 常见繁体补充（题库/考试界面高频字，原表未覆盖）
+    '據': '据', '險': '险', '練': '练', '習': '习',
+    '斷': '断', '層': '层', '檢': '检', '份': '份',
+    '參': '参', '權': '权', '護': '护', '環': '环',
+    '預': '预', '資': '资', '儲': '储', '記': '记',
+    '錄': '录', '載': '载', '稱': '称', '語': '语',
+    '複': '复', '雜': '杂', '類': '类', '碼': '码',
+    '節': '节', '約': '约', '訪': '访', '審': '审',
+    '核': '核', '圍': '围', '顯': '显', '輸': '输',
+    '錯': '错', '誤': '误', '警': '警', '告': '告',
+    '限': '限', '示': '示', '出': '出',
   };
 
   /// 已知的 UI 噪声关键词（来自考试页面元素）
@@ -47,6 +58,10 @@ class TextPreprocessor {
     '倒计时', '交卷', '剩余时间', '答题卡',
     '上一题', '下一题', '提交提交', '返回列表',
     '单选题', '多选题', '判断题', '填空题',
+    // 题库首页/导航元素（OCR 在非题目页面触发时会识别到）
+    '会员中心', '随机练习', '题型练习', '章节练习', '顺序练习',
+    '模拟考试', '去考试', '精简题', '易错题', '考点速记', '试题搜索',
+    // 注意：保命题/坦本安 等标记在 Phase 1 用正则子串移除（它们常与题干同行，整行过滤会误删题干）
     // 注意：OCR 题型标签乱码（"2斩题 多造" 等）在 Phase 1 用正则子串移除，
     // 不能放进这里——_noiseKeywords 是整行过滤，会误删同行题干。
   };
@@ -96,6 +111,33 @@ class TextPreprocessor {
     result = result.replaceAll(RegExp(r'^\s*多\s*选\s*', multiLine: true), '');
     result = result.replaceAll(RegExp(r'^\s*单\s*选\s*', multiLine: true), '');
     result = result.replaceAll(RegExp(r'^\s*判\s*断\s*', multiLine: true), '');
+    // 1.8 OCR 高频错字纠正（基于真机日志收集：MLKit 中文识别常见误字）
+    //     注意顺序：先纠正长词再纠正单字，避免误伤
+    result = result.replaceAll('业务教据', '业务数据');
+    result = result.replaceAll('运行叁数', '运行参数');
+    result = result.replaceAll('叁数', '参数');
+    result = result.replaceAll('模拟孝试', '模拟考试');
+    result = result.replaceAll('去孝试', '去考试');
+    result = result.replaceAll('负贵人', '负责人');
+    result = result.replaceAll('负麦人', '负责人');
+    result = result.replaceAll('遵宁', '遵守');
+    result = result.replaceAll('指辉', '指挥');
+    result = result.replaceAll('请楚', '清楚');
+    result = result.replaceAll('安全搭施', '安全措施');
+    result = result.replaceAll('安全指施', '安全措施');
+    result = result.replaceAll('签各', '签名');
+    result = result.replaceAll('簽名', '签名');
+    result = result.replaceAll('上簽名', '上签名');
+    result = result.replaceAll('范国', '范围');
+    result = result.replaceAll('作业范', '作业范');
+    result = result.replaceAll('貴任', '责任');
+    result = result.replaceAll('青任', '责任');
+    result = result.replaceAll('教据', '数据');
+    result = result.replaceAll('業務', '业务');
+    // 1.9 题目列表标记子串移除（与题干同行，不能整行删）
+    result = result.replaceAll(RegExp(r'[★☆]\s*\(?\s*保命?题?\s*\)?'), '');
+    result = result.replaceAll(RegExp(r'坦本安|基本安|本安规'), '');
+    result = result.replaceAll(RegExp(r'会员中心|随机练习|题型练习|章节练习|顺序练习|模拟考试|去考试|精简题|易错题|考点速记|试题搜索'), '');
     result = result.replaceAll(RegExp(r'\s+'), ' ');
 
     // === Phase 2: 按行过滤 ===

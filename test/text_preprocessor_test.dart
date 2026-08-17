@@ -300,5 +300,57 @@ void main() {
       expect(result, contains('地球是圆的'));
     });
   });
+
+  group('TextPreprocessor - 其他手机 OCR 场景修复', () {
+    test('繁体 多選 应识别并过滤题型标签', () {
+      final result = TextPreprocessor.preprocess('多選\n根据信息安规规定，授权应基于权限最小化的原则');
+      expect(result, isNot(contains('多选')));
+      expect(result, contains('根据信息安规规定'));
+    });
+
+    test('繁体 業務數據 应转换为简体', () {
+      final result = TextPreprocessor.preprocessRaw('检修前应备份可能受影响的業務數據');
+      expect(result, contains('业务数据'));
+    });
+
+    test('OCR 错字 业务教据 应纠正为 业务数据', () {
+      final result = TextPreprocessor.preprocess('检修前,应备份可能受影响的业务教据');
+      expect(result, contains('业务数据'));
+    });
+
+    test('OCR 错字 运行叁数 应纠正为 运行参数', () {
+      final result = TextPreprocessor.preprocess('备份可能受影响的运行叁数');
+      expect(result, contains('运行参数'));
+    });
+
+    test('OCR 错字 负贵人/指辉 应纠正', () {
+      expect(TextPreprocessor.preprocess('服从工作负贵人的指辉'), contains('服从工作负责人的指挥'));
+    });
+
+    test('首页导航元素应被过滤', () {
+      final result = TextPreprocessor.preprocess('会员中心 随机练习 章节练习\n根据信息安规规定');
+      expect(result, contains('根据信息安规规定'));
+      expect(result, isNot(contains('会员中心')));
+      expect(result, isNot(contains('随机练习')));
+    });
+
+    test('保命题标记应被过滤', () {
+      final result = TextPreprocessor.preprocess('★(保命题)根据信息安规规定，数据库');
+      expect(result, isNot(contains('保命题')));
+      expect(result, contains('根据信息安规规定'));
+    });
+
+    test('坦本安 页面底部乱码应被过滤', () {
+      final result = TextPreprocessor.preprocess('根据信息安规规定 坦本安');
+      expect(result, contains('根据信息安规规定'));
+      expect(result, isNot(contains('坦本安')));
+    });
+
+    test('繁体 判斷 应识别为题型并处理', () {
+      final result = TextPreprocessor.preprocess('判斷題\n地球是圆的');
+      expect(result, isNot(contains('判断')));
+      expect(result, contains('地球是圆的'));
+    });
+  });
 }
 

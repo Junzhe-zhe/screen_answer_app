@@ -822,5 +822,62 @@ void main() {
       }
     });
   });
+
+  group('MatchEngine - 按题型匹配（单选匹配单选，判断匹配判断）', () {
+    final engine = MatchEngine([
+      QuestionPair(
+        question: '以下关于信息安全的说法，正确的是',
+        answer: 'A. 密码要定期更换；B. 密码可以告诉同事',
+        type: 'single',
+      ),
+      QuestionPair(
+        question: '以下关于信息安全的说法，正确的是',
+        answer: '正确',
+        type: 'judge',
+      ),
+      QuestionPair(
+        question: '根据信息安规规定，工作票上需要填写的内容包括',
+        answer: 'A. 工作内容；B. 工作地点；C. 工作负责人',
+        type: 'multi',
+      ),
+    ]);
+
+    test('题型已识别(ocrType=single)时严格匹配单选，不命中判断题', () {
+      final r = engine.match(
+          'A. 密码要定期更换 B. 密码可以告诉同事 以下关于信息安全的说法，正确的是',
+          ocrType: 'single');
+      expect(r.level, isNot(MatchLevel.none));
+      expect(r.answer, contains('密码要定期更换'));
+      expect(r.answer, isNot('正确'));
+    });
+
+    test('题型已识别(ocrType=judge)时严格匹配判断题', () {
+      final r = engine.match('以下关于信息安全的说法，正确的是', ocrType: 'judge');
+      expect(r.level, isNot(MatchLevel.none));
+      expect(r.answer, '正确');
+    });
+
+    test('未识别题型但选项为判断词(A.正确 B.错误)时推断为判断题并匹配', () {
+      // 判断题的选项结构：A.正确 B.错误 → 应推断为 judge
+      final r = engine.matchWithCandidates(
+          '以下关于信息安全的说法，正确的是 A. 正确 B. 错误');
+      expect(r.answer, isNot(contains('密码要定期更换'))); // 不命中单选
+      expect(r.answer, '正确'); // 命中判断题
+    });
+
+    test('判断题无选项锚点(纯题干)时宽松匹配仍可命中判断题', () {
+      // 判断题 OCR 只识别出题干 → 宽松匹配 → 判断题可命中
+      final r = engine.match('以下关于信息安全的说法，正确的是');
+      expect(r.level, isNot(MatchLevel.none));
+    });
+
+    test('未识别题型且选项为普通内容时宽松匹配（不严格推断），单选可命中', () {
+      // 普通选项结构（A-D）无法区分单选/多选 → 不推断，宽松匹配
+      // 宽松模式下单选文本仍可命中单选题（因题库判断题/单选题文本不同）
+      final r = engine.matchWithCandidates(
+          '以下关于信息安全的说法，正确的是 A. 密码要定期更换 B. 密码可以告诉同事');
+      expect(r.level, isNot(MatchLevel.none));
+    });
+  });
 }
 

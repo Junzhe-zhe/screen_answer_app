@@ -7,18 +7,20 @@ class MatchEngine {
   /// 与 [_pairs] 平行的预计算预处理文本，避免每次匹配重复预处理全部题目。
   final List<String> _preprocessedQuestions;
 
-  /// 构造时对重复题目去重：相同【原始题目文本】只保留最后插入者。
+  /// 构造时对重复题目去重：相同【原始题目文本 + 题型】只保留最后插入者。
   ///
-  /// 注意：去重键必须用原始文本而非预处理文本——预处理是强过滤管线，
+  /// 注意1：去重键必须用原始文本而非预处理文本——预处理是强过滤管线，
   /// 两道不同的题（如仅数字/选项不同）预处理后可能相同，按预处理去重会误删题目。
-  /// 只有完全相同的题目（重复导入/重复录入）才去重，保证
-  /// L1 精确匹配 / L1.5 包含匹配 / L2 模糊匹配对重复题目的行为一致。
+  /// 注意2：去重键必须包含题型——同一题干可能是单选也可能是判断（如
+  /// "以下说法正确的是"），仅答案不同。按纯文本去重会把其中一个挤掉，
+  /// 导致"单选匹配到判断题"或反之。包含题型后两者都保留。
   factory MatchEngine(List<QuestionPair> pairs) {
     final seen = <String>{};
     final deduped = <QuestionPair>[];
     final preprocessed = <String>[];
     for (final p in pairs.reversed) {
-      if (seen.add(p.question)) {
+      // 去重键 = 原始题干 + 题型（同题干不同题型都保留）
+      if (seen.add('${p.question}|${p.type}')) {
         deduped.add(p);
         preprocessed.add(TextPreprocessor.preprocess(p.question));
       }
@@ -41,8 +43,8 @@ class MatchEngine {
       return _fuzzyResult(_scorePairs(raw, ocrType: ocrType));
     }
 
-    return _exactAndContainMatch(preprocessed, ocrType: ocrType) ??
-        _fuzzyResult(_scorePairs(preprocessed, ocrType: ocrType));
+    return _exactAndContainMatch(preprocessed, ocrType: ocrType, rawOcrText: ocrText) ??
+        _fuzzyResult(_scorePairs(preprocessed, ocrType: ocrType, rawOcrText: ocrText));
   }
 
   /// 带候选列表的匹配：正常匹配 + 失败时返回 Top-3 候选
@@ -52,20 +54,23 @@ class MatchEngine {
     if (preprocessed.isEmpty) {
       final raw = TextPreprocessor.preprocessRaw(ocrText);
       if (raw.isEmpty) return MatchResult.empty();
-      return _fuzzyWithCandidates(_scorePairs(raw, ocrType: ocrType));
+      return _fuzzyWithCandidates(_scorePairs(raw, ocrType: ocrType, rawOcrText: ocrText));
     }
 
-    return _exactAndContainMatch(preprocessed, ocrType: ocrType) ??
-        _fuzzyWithCandidates(_scorePairs(preprocessed, ocrType: ocrType));
+    return _exactAndContainMatch(preprocessed, ocrType: ocrType, rawOcrText: ocrText) ??
+        _fuzzyWithCandidates(_scorePairs(preprocessed, ocrType: ocrType, rawOcrText: ocrText));
   }
 
   /// L1: 精确匹配（遍历已去重的题目列表）+ L1.5: 包含匹配，未命中返回 null
   MatchResult? _exactAndContainMatch(String preprocessed,
-      {String ocrType = ''}) {
+      {String ocrType = '', String rawOcrText = ''}) {
     // L1: 精确匹配。按题型从原始题目列表筛选；倒序遍历使重复题目取最后插入者。
     for (var i = _pairs.length - 1; i >= 0; i--) {
       final pair = _pairs[i];
-      if (!_isTypeCompatible(pair, ocrType, allowUnknownOcrType: true)) continue;
+      if (!_isTypeCompatible(pair, ocrType, ocrText: rawOcrText,
+          allowUnknownOcrType: true)) {
+        continue;
+      }
       if (_preprocessedQuestions[i] != preprocessed) continue;
       return MatchResult(
         answer: pair.answer,
@@ -85,7 +90,10 @@ class MatchEngine {
       final pair = _pairs[i];
       final bankQ = _preprocessedQuestions[i];
       if (bankQ.isEmpty) continue;
-      if (!_isTypeCompatible(pair, ocrType, allowUnknownOcrType: true)) continue;
+      if (!_isTypeCompatible(pair, ocrType, ocrText: rawOcrText,
+          allowUnknownOcrType: true)) {
+        continue;
+      }
       if (bankQ.length < 8) continue; // 太短的题目跳过包含匹配
       if (preprocessed.contains(bankQ)) {
         // OCR 包含完整题目 -> 精确匹配
@@ -133,7 +141,8 @@ class MatchEngine {
   }
 
   /// L2: 对全部题目做模糊评分（一次遍历，同时收集候选）
-  _FuzzyOutcome _scorePairs(String preprocessed, {String ocrType = ''}) {
+  _FuzzyOutcome _scorePairs(String preprocessed,
+      {String ocrType = '', String rawOcrText = ''}) {
     var bestScore = 0.0;
     QuestionPair? bestPair;
     final scored = <_ScoredPair>[];
@@ -143,6 +152,7 @@ class MatchEngine {
       if (!_isTypeCompatible(
         pair,
         ocrType,
+        ocrText: rawOcrText,
         allowUnknownOcrType: ocrType.isEmpty,
       )) {
         continue;
@@ -221,12 +231,56 @@ class MatchEngine {
     QuestionPair pair,
     String ocrType, {
     required bool allowUnknownOcrType,
+    String ocrText = '',
   }) {
-    if (ocrType.isEmpty) {
-      // 未识别题型时允许精确/包含匹配保留兼容性；模糊评分由调用方禁止跨题型。
-      return allowUnknownOcrType || pair.type.isNotEmpty;
+    if (ocrType.isNotEmpty) {
+      // 题型已识别（原生端）→ 严格按题型匹配：
+      //   单选匹配单选，多选匹配多选，判断匹配判断。
+      //   题库题 type 为空（答案无法推断题型）→ 视为与任何题型兼容。
+      return pair.type.isEmpty || pair.type == ocrType;
     }
-    return pair.type == ocrType;
+    // 题型未识别 → 从 OCR 文本推断题型（仅当有明确题型特征时）；
+    // 推断出则严格按题型匹配，推断不出则宽松处理。
+    final inferred = _inferOcrTypeFromText(ocrText);
+    if (inferred.isNotEmpty) {
+      return pair.type.isEmpty || pair.type == inferred;
+    }
+    // 推断不出（纯题干文本，无选项锚点）→ 宽松匹配，保证判断题/未带标签题可命中
+    return allowUnknownOcrType || pair.type.isNotEmpty;
+  }
+
+  /// 从 OCR 原始文本推断题型（原生端未识别题型时的兜底推断）
+  /// 规则：题型标签优先；其次是选项结构——选项全为判断词(正确/错误/对/错/是/否)
+  /// 判为判断，否则按选择题。纯题干无选项时返回空（由调用方宽松处理）。
+  static String _inferOcrTypeFromText(String text) {
+    if (text.isEmpty) return '';
+    // 1) 显式题型标签
+    if (RegExp(r'多选|多项选择|可多选|多选题').hasMatch(text)) return 'multi';
+    if (RegExp(r'单选|单项选择|单选题').hasMatch(text)) return 'single';
+    if (RegExp(r'判断|判断题').hasMatch(text)) return 'judge';
+
+    // 2) 选项结构分析（至少 2 个选项锚点）
+    final markerRegex = RegExp(r'(?<![A-Z])[A-H]\s*[.、．:：)]');
+    final matches = markerRegex.allMatches(text).toList();
+    if (matches.length >= 2) {
+      // 提取每个选项的内容文本
+      final optionTexts = <String>[];
+      for (var i = 0; i < matches.length; i++) {
+        final start = matches[i].end;
+        final end = (i + 1 < matches.length) ? matches[i + 1].start : text.length;
+        final opt = text.substring(start, end).trim();
+        if (opt.isNotEmpty) optionTexts.add(opt);
+      }
+      // 选项全为判断词 → 判断题（如 "A.正确 B.错误"），明确特征才推断
+      final judgeWords = {'正确', '错误', '对', '错', '是', '否'};
+      if (optionTexts.isNotEmpty && optionTexts.every(judgeWords.contains)) {
+        return 'judge';
+      }
+      // 普通选项结构（A-D）无法区分单选/多选 → 不推断，交由宽松匹配
+      // （避免把多选题误判为单选导致严格过滤后匹配失败）
+      return '';
+    }
+    return '';
   }
 
   /// 最长公共子串

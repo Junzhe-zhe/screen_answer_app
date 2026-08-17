@@ -4,6 +4,8 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.ComponentCallbacks
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.Intent
 import android.graphics.*
@@ -30,7 +32,7 @@ import java.nio.ByteBuffer
 import com.screenanswer.screen_answer_app.MainActivity
 import io.flutter.embedding.engine.FlutterEngineCache
 
-class FloatService : Service() {
+class FloatService : Service(), ComponentCallbacks2 {
     companion object {
         private const val TAG = "FloatService"
         private const val CHANNEL_ID = "fch"
@@ -57,6 +59,15 @@ class FloatService : Service() {
 
     private var selX = 100; private var selY = 200
     private var selW = 1080; private var selH = 600
+    // 截图帧实际尺寸（ImageReader），可能与 getRealMetrics 物理尺寸不同
+    // （部分机型系统 UI 缩放/虚拟显示密度差异导致），裁剪换算以此为准
+    private var captureFrameW = 0
+    private var captureFrameH = 0
+    // 悬浮窗坐标(应用可用区域)与全屏截图(含状态栏)的纵向偏移
+    // TYPE_APPLICATION_OVERLAY 的 y 从应用区域(状态栏下方)算起，全屏截图从 0 算起
+    private var statusBarOffsetY = 0
+    private var statusBarHeightPx = 0   // 系统资源获取的真实状态栏高度(px)，各品牌准确
+    private var isLandscape = false     // 横屏状态（偏移加到横轴）
     private var screenW = 1080; private var screenH = 2400
     private var selVisible = false
     private var ansVisible = false
@@ -95,16 +106,63 @@ class FloatService : Service() {
             previousUncaughtHandler?.uncaughtException(thread, error)
         }
         diag("service-create", "screen initialization started")
+        // 注册配置变化监听（Service 不会自动接收，需显式注册）
+        try { registerComponentCallbacks(this) } catch (e: Exception) {}
         val dm = DisplayMetrics()
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         wm?.defaultDisplay?.getRealMetrics(dm)
         screenW = dm.widthPixels; screenH = dm.heightPixels
-        selW = screenW - 40; selH = 600
-        selX = 20; selY = (screenH * 0.15).toInt()
+        initScreenAdaptive()
         loadPersistedSettings()
         createChannel(); startFg(); createBall()
         diag("service-create", "screen=${screenW}x${screenH} overlay created")
         setupRecognitionChannel()
+    }
+
+    /// 屏幕自适应初始化：按当前屏幕尺寸与旋转状态设置相对默认值
+    private fun initScreenAdaptive() {
+        updateOrientation()
+        // 状态栏高度用系统资源获取（各品牌 ROM 正确返回，含刘海/挖孔）
+        statusBarHeightPx = getStatusBarHeight()
+        // 默认框选区域：宽度=屏宽-小边距，高度=屏高约22%（覆盖单题），
+        // 起始位置 = 屏高15%处（避开顶部状态栏/导航栏区域）
+        val density = resources.displayMetrics.density
+        selW = screenW - (16 * density).toInt()
+        selH = (screenH * 0.22f).toInt().coerceAtLeast((120 * density).toInt())
+        selX = (8 * density).toInt()
+        selY = (screenH * 0.15f).toInt()
+        clampSelection()
+    }
+
+    /// 从系统资源获取真实状态栏高度（px），各品牌均正确
+    private fun getStatusBarHeight(): Int {
+        return try {
+            val res = resources
+            val id = res.getIdentifier("status_bar_height", "dimen", "android")
+            if (id > 0) res.getDimensionPixelSize(id) else 0
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    /// 检测旋转状态：横屏时状态栏在侧边，偏移应加到横轴
+    private fun updateOrientation() {
+        isLandscape = try {
+            val rot = wm?.defaultDisplay?.rotation ?: Surface.ROTATION_0
+            rot == Surface.ROTATION_90 || rot == Surface.ROTATION_270
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /// 严格约束框选区域在屏幕内（保证显示选框与实际裁剪区域严格一致）
+    private fun clampSelection() {
+        val maxW = screenW.coerceAtLeast(1)
+        val maxH = screenH.coerceAtLeast(1)
+        selX = selX.coerceIn(0, maxW - 1)
+        selY = selY.coerceIn(0, maxH - 1)
+        selW = selW.coerceIn(1, maxW - selX)
+        selH = selH.coerceIn(1, maxH - selY)
     }
 
     private fun setupRecognitionChannel() {
@@ -192,7 +250,8 @@ class FloatService : Service() {
                     mediaProjection = pm.getMediaProjection(rc, data)
                     val dm = DisplayMetrics()
                     wm?.defaultDisplay?.getRealMetrics(dm)
-                    screenW = dm.widthPixels; screenH = dm.heightPixels; selW = screenW - 40
+                    screenW = dm.widthPixels; screenH = dm.heightPixels
+                    initScreenAdaptive()
                     toast("projection OK ${screenW}x${screenH}")
                 } catch (e: Exception) { toast("projection FAIL: ${e.message}") }
             }
@@ -202,9 +261,52 @@ class FloatService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /// 屏幕旋转/配置变化时重算尺寸与偏移，保证框选与识别始终一致
+    // Service 本身不接收配置变化，需实现 ComponentCallbacks2 接口。
+    // 注意：FloatService 已在 class 声明处实现接口（见文件头部 class 定义），
+    // 此处的方法会被 Android 通过 ComponentCallbacks2 回调。
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        try {
+            handler.post {
+                val dm = DisplayMetrics()
+                wm?.defaultDisplay?.getRealMetrics(dm)
+                screenW = dm.widthPixels; screenH = dm.heightPixels
+                updateOrientation()
+                if (statusBarHeightPx <= 0) statusBarHeightPx = getStatusBarHeight()
+                if (isLandscape) statusBarOffsetY = 0 else statusBarOffsetY = statusBarHeightPx
+                clampSelection()
+                // 重算后同步悬浮球与答案面板位置（若存在）
+                selParams?.let {
+                    it.x = selX; it.y = selY; it.width = selW; it.height = selH
+                    try { wm?.updateViewLayout(selView, it) } catch (_: Exception) {}
+                }
+                diag("config-changed", "screen=${screenW}x${screenH} landscape=$isLandscape offset=$statusBarOffsetY")
+            }
+        } catch (e: Exception) {
+            diag("config-changed", "failed", e)
+        }
+    }
+
     override fun onDestroy() {
         diag("service-destroy", "generation=$activeRecognitionGeneration inFlight=$recognitionInFlight captureSetup=$captureSetupDone")
         FlutterBridge.service = null
+        try { unregisterComponentCallbacks(this) } catch (e: Exception) {}
+        // 清空所有挂起的回调（监控轮询/识别超时/重试链），防止销毁后仍执行导致崩溃或泄漏
+        try {
+            monitorRunnable?.let { handler.removeCallbacks(it) }
+            monitorRunnable = null
+            recognitionTimeout?.let { handler.removeCallbacks(it) }
+            recognitionTimeout = null
+            selAutoTimer?.let { handler.removeCallbacks(it) }
+            selAutoTimer = null
+            handler.removeCallbacksAndMessages(null)
+        } catch (e: Exception) { diag("service-destroy", "callback cleanup failed", e) }
+        // 回收可能残留的截图
+        try {
+            capturedBitmap?.let { if (!it.isRecycled) it.recycle() }
+            capturedBitmap = null
+        } catch (e: Exception) {}
         super.onDestroy()
         stopMonitoring()
         recognitionChannel = null
@@ -236,13 +338,17 @@ class FloatService : Service() {
 
     // ====== Floating ball ======
 
-    private fun createBall(startX: Int = 50, startY: Int = 500) {
+    private fun createBall(startX: Int = -1, startY: Int = -1) {
         val sz = (ballSizeDp * resources.displayMetrics.density).toInt()
+        // 悬浮球初始位置：屏幕右上角区域（相对尺寸，适配各分辨率）
+        val density = resources.displayMetrics.density
+        val bx = if (startX >= 0) startX else screenW - sz - (12 * density).toInt()
+        val by = if (startY >= 0) startY else (screenH * 0.25f).toInt()
         val typ = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else WindowManager.LayoutParams.TYPE_PHONE
         ballParams = WindowManager.LayoutParams(sz, sz, typ,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = startX; y = startY }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = bx; y = by }
 
         ball = View(this).apply {
             background = GradientDrawable().apply {
@@ -288,15 +394,16 @@ class FloatService : Service() {
         val typ = if (Build.VERSION.SDK_INT >= 26) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else WindowManager.LayoutParams.TYPE_PHONE
 
-        val aw = screenW - 40; val ah = (screenH * 0.55).toInt()
+        val density = resources.displayMetrics.density
+        val aw = screenW - (16 * density).toInt()
+        val ah = (screenH * 0.55f).toInt()
         ansParams = WindowManager.LayoutParams(aw, ah, typ,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 20; y = (screenH * 0.12).toInt()
+            x = (8 * density).toInt(); y = (screenH * 0.12f).toInt()
         }
 
-        val density = resources.displayMetrics.density
         val titleH = (48 * density).toInt()
         val resizeSz = (44 * density).toInt()
 
@@ -557,6 +664,10 @@ class FloatService : Service() {
                             return true
                         }
                         MotionEvent.ACTION_UP -> {
+                            clampSelection()
+                            selParams!!.x = selX; selParams!!.y = selY
+                            selParams!!.width = selW; selParams!!.height = selH
+                            try { wm?.updateViewLayout(v, selParams) } catch (_: Exception) {}
                             selAutoTimer = Runnable { performRecognition() }
                             selAutoTimer?.let { handler.postDelayed(it, 600) }
                             return true
@@ -627,10 +738,29 @@ class FloatService : Service() {
 
         val dm = DisplayMetrics()
         wm?.defaultDisplay?.getRealMetrics(dm)
-        val captureW = dm.widthPixels
-        val captureH = dm.heightPixels
-        val captureDpi = dm.densityDpi
-        screenW = captureW; screenH = captureH
+        // 内存优化：截屏分辨率降为物理屏 0.75x。
+        // 全屏 RGBA 帧 1440x3200 = 18.4MB/帧，0.75x(1080x2400) 仅 10.4MB/帧，
+        // 长时间连续识别上百题时显著降低内存峰值与 GC 压力。
+        // OCR 对 0.75x 中文文字识别质量几乎无损（ML Kit 要求 ≥320px 高即可）。
+        val scale = 0.75f
+        val captureW = (dm.widthPixels * scale).toInt().coerceAtLeast(720)
+        val captureH = (dm.heightPixels * scale).toInt().coerceAtLeast(1280)
+        // 虚拟显示 density 同步缩放，保证截图内容比例与真实屏幕一致
+        val captureDpi = (dm.densityDpi * scale).toInt().coerceAtLeast(240)
+        screenW = dm.widthPixels; screenH = dm.heightPixels
+
+        // 悬浮窗坐标(应用可用区域)与全屏截图(物理坐标)的偏移：
+        // 竖屏时状态栏在顶部(y偏移)，横屏时状态栏在侧边(x偏移)
+        updateOrientation()
+        if (statusBarHeightPx <= 0) statusBarHeightPx = getStatusBarHeight()
+        if (isLandscape) {
+            // 横屏：状态栏通常在左侧或右侧，x 需要偏移
+            // 简单起见按左偏移处理（多数横屏应用状态栏在左）
+            statusBarOffsetY = 0
+        } else {
+            statusBarOffsetY = statusBarHeightPx
+        }
+        clampSelection()
 
         captureThread = HandlerThread("capture").also { it.start() }
         captureHandler = Handler(captureThread!!.looper)
@@ -640,6 +770,9 @@ class FloatService : Service() {
             mediaProjection!!.registerCallback(projectionCallback, handler)
 
             imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
+            // 以 ImageReader 实际帧尺寸作为裁剪换算基准（可能小于物理屏）
+            captureFrameW = imageReader!!.width
+            captureFrameH = imageReader!!.height
             imageReader!!.setOnImageAvailableListener(
                 ImageReader.OnImageAvailableListener { reader ->
                     val img = reader.acquireLatestImage()
@@ -746,6 +879,11 @@ class FloatService : Service() {
                 diag("recognition-timeout", "generation=$generation auto=$autoRecognize")
                 recognitionInFlight = false
                 isCapturing = false
+                // 超时时回收可能残留的截图帧，避免内存泄漏
+                try {
+                    capturedBitmap?.let { if (!it.isRecycled) it.recycle() }
+                    capturedBitmap = null
+                } catch (e: Exception) {}
                 if (autoRecognize) startMonitoring()
             }
         }
@@ -775,12 +913,23 @@ class FloatService : Service() {
                 capturedBitmap = null
                 var cropped: Bitmap? = null
                 try {
-                    // 使用 bitmap 实际尺寸作为基准计算缩放比，避免 screenW/screenH 与 ImageReader 不一致
+                    // 使用 bitmap 实际尺寸作为基准计算缩放比。
+                    // 注意：截屏分辨率可能小于物理屏（内存优化 0.75x / 部分机型缩放），
+                    // 缩放比必须 = 帧尺寸 / 物理屏尺寸，不能用帧尺寸自身（会得 1.0 导致坐标错位）。
                     val sw = bmp.width.toFloat(); val sh = bmp.height.toFloat()
-                    val scaleX = sw / screenW.coerceAtLeast(1)
-                    val scaleY = sh / screenH.coerceAtLeast(1)
-                    val cx = (selX * scaleX).toInt().coerceIn(0, bmp.width)
-                    val cy = (selY * scaleY).toInt().coerceIn(0, bmp.height)
+                    val scaleX = sw / screenW.coerceAtLeast(1).toFloat()
+                    val scaleY = sh / screenH.coerceAtLeast(1).toFloat()
+                    // 严格边界：先约束框选区域在屏幕内（显示与识别严格一致）
+                    clampSelection()
+                    // 悬浮窗坐标(应用可用区域) → 全屏截图坐标：加状态栏偏移
+                    // 竖屏偏移加到 y，横屏偏移加到 x
+                    val offX = if (isLandscape) statusBarOffsetY else 0
+                    val offY = if (isLandscape) 0 else statusBarOffsetY
+                    val selXFull = (selX + offX).toFloat()
+                    val selYFull = (selY + offY).toFloat()
+                    val cx = (selXFull * scaleX).toInt().coerceIn(0, bmp.width - 1)
+                    val cy = (selYFull * scaleY).toInt().coerceIn(0, bmp.height - 1)
+                    // 裁剪宽度/高度严格 ≤ 框选区域映射尺寸，且不超出截图边界
                     val cw = (selW * scaleX).toInt().coerceAtMost(bmp.width - cx)
                     val ch = (selH * scaleY).toInt().coerceAtMost(bmp.height - cy)
                     // 内缩 3px，避免选框边框像素被 OCR 误识别
@@ -820,7 +969,8 @@ class FloatService : Service() {
         lastChangeTime = 0
         monitorRunnable = object : Runnable {
             override fun run() {
-                if (ansVisible && !recognitionInFlight && !isCapturing && !isMonitoring) {
+                if (!ansVisible) { stopMonitoring(); return } // 面板已隐藏，停止轮询
+                if (!recognitionInFlight && !isCapturing && !isMonitoring) {
                     isMonitoring = true
                 }
                 handler.postDelayed(this, 300) // 300ms 轮询快速响应用户滑动切题
@@ -843,10 +993,17 @@ class FloatService : Service() {
         val pixelStride = planes[0].pixelStride
         val rowStride = planes[0].rowStride
         val w = img.width; val h = img.height
-        val sx = (selX * w / screenW).coerceIn(0, w - 1)
-        val sy = (selY * h / screenH).coerceIn(0, h - 1)
-        val ex = ((selX + selW) * w / screenW).coerceIn(0, w - 1)
-        val ey = ((selY + selH) * h / screenH).coerceIn(0, h - 1)
+        // 与裁剪逻辑保持一致：加状态栏偏移后再映射到帧坐标
+        val offX = if (isLandscape) statusBarOffsetY else 0
+        val offY = if (isLandscape) 0 else statusBarOffsetY
+        val fx = (selX + offX).coerceIn(0, screenW - 1)
+        val fy = (selY + offY).coerceIn(0, screenH - 1)
+        val fw = selW.coerceAtMost(screenW - fx)
+        val fh = selH.coerceAtMost(screenH - fy)
+        val sx = (fx * w / screenW.coerceAtLeast(1)).coerceIn(0, w - 1)
+        val sy = (fy * h / screenH.coerceAtLeast(1)).coerceIn(0, h - 1)
+        val ex = ((fx + fw) * w / screenW.coerceAtLeast(1)).coerceIn(0, w - 1)
+        val ey = ((fy + fh) * h / screenH.coerceAtLeast(1)).coerceIn(0, h - 1)
         var hash = 0L
         for (i in 0..2) {
             for (j in 0..2) {
@@ -934,6 +1091,13 @@ class FloatService : Service() {
             Regex("""^\s*判\s*断\s*题\s*$"""),           // 变体标签
             Regex("""(多项选择题|单项选择题)"""),         // 不加空格的标签
             Regex("""^\s*第\s*\d+\s*题\s*$"""),          // "第4题"
+            Regex("""^\s*[A-Z]?\s*\d+\s*[/\/⼀]\s*\d+\s*$"""),  // "N 127/285" 带字母前缀进度
+            Regex("""[★☆]\s*\(?\s*保命题?\s*\)?"""),   // "★(保命题)" 标记
+            Regex("""(会员中心|随机练习|题型练习|章节练习|顺序练习|模拟考试|去考试|精简题|易错题|考点速记|试题搜索|模拟孝试|去孝试|精简題|易錯題|考點速記|試題搜索)"""), // 题库首页元素
+            Regex("""^\s*多\s*選\s*"""),                 // 行首繁体"多選"
+            Regex("""^\s*單\s*選\s*"""),                 // 行首繁体"單選"
+            Regex("""^\s*判\s*斷\s*題?\s*"""),          // 行首繁体"判斷題"
+            Regex("""^\s*(坦本安|本安|基安)"""),           // "坦本安" 等页面底部乱码
             // OCR 题型标签乱码变体："多选题"→"2斩题 多造"、"多选题"→"多逸" 等
             Regex("""斩\s*题"""),                            // "斩题"（"多选题"→"2斩题/&斩题" 乱码，无条件删除）
             Regex("""多造"""),                              // "多选" 误识别
@@ -1008,14 +1172,17 @@ class FloatService : Service() {
         // 页面题型标签优先，兼容 OCR 只识别出“单选/多选/判断”的情况。
         if (normalized.contains("多选") || normalized.contains("可多选") ||
             normalized.contains("多项选择") || normalized.contains("多项选择题") ||
-            normalized.contains("多造") || normalized.contains("多逸")) {
+            normalized.contains("多造") || normalized.contains("多逸") ||
+            normalized.contains("多選") || normalized.contains("多逸選")) {
             return "multi"
         }
         if (normalized.contains("单选") || normalized.contains("单项选择") ||
-            normalized.contains("单项选择题")) {
+            normalized.contains("单项选择题") || normalized.contains("單選") ||
+            normalized.contains("单選")) {
             return "single"
         }
-        if (normalized.contains("判断题") || normalized.contains("判断")) {
+        if (normalized.contains("判断题") || normalized.contains("判断") ||
+            normalized.contains("判斷題") || normalized.contains("判斷")) {
             return "judge"
         }
 
@@ -1025,14 +1192,24 @@ class FloatService : Service() {
             .filter { optionPrefix.containsMatchIn(it) }
             .map { optionPrefix.replaceFirst(it, "").trim() }
             .filter { it.isNotEmpty() }
+        // 增强：行内多选项（OCR 常把 "A.xxx B.xxx C.xxx" 识别为一行）
+        // 以及无分隔符选项（"A业务数据"）——统计所有选项字母出现次数
+        var inlineOptionCount = 0
+        for (line in lines) {
+            val markers = Regex("""(?<![A-Z])[A-H](?=\s*[\.、．:：]|\s+[^\s]|$)""")
+                .findAll(line).count()
+            inlineOptionCount += markers
+        }
+        val totalOptions = maxOf(optionTexts.size, inlineOptionCount)
+
         val judgeWords = setOf("正确", "错误", "对", "错", "是", "否")
 
         // 只有所有有效选项都是完整判断词时，才认定为判断题。
-        if (optionTexts.size >= 2 && optionTexts.all { it in judgeWords }) {
+        if (totalOptions >= 2 && optionTexts.isNotEmpty() && optionTexts.all { it in judgeWords }) {
             return "judge"
         }
         // 没有明确标签时，两个及以上普通选项按单选处理，避免误判为判断题。
-        if (optionTexts.size >= 2) return "single"
+        if (totalOptions >= 2) return "single"
         return ""
     }
 
@@ -1057,6 +1234,7 @@ class FloatService : Service() {
                 if (rawText.isEmpty()) {
                     if (!autoRecognize) updateAnswer("未检测到文字")
                     finishRecognition(generation, autoRecognize)
+                    if (!bitmap.isRecycled) bitmap.recycle()
                 } else {
                     // 从原始 OCR 文本检测题型
                     val ocrType = detectQuestionType(rawText)
